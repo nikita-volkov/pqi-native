@@ -43,17 +43,18 @@ data NativeResult = NativeResult
   deriving stock (Eq, Show)
 
 -- | A standalone cancellation handle for the native adapter.
-data NativeCancel
-  = NativeCancel
-      -- | host
-      ByteString
-      -- | port
-      Int
-      -- | PID
-      Int32
-      -- | secret
-      Int32
-  deriving stock (Eq, Show)
+--
+-- Carries a reference to the connection's @asyncPending@ flag so the
+-- implementation can skip the network round-trip when nothing is actually
+-- in flight (avoids a race where a stale cancel signal interrupts the next
+-- command sent on the same connection).
+data NativeCancel = NativeCancel
+  { host :: ByteString,
+    port :: Int,
+    pid :: Int32,
+    secret :: Int32,
+    asyncPendingRef :: IORef Bool
+  }
 
 -- | Like 'formatResultError' but without a client query text (for
 -- connection-level errors, which never carry a statement-position field).
@@ -157,11 +158,15 @@ instance IsResult NativeResult where
   cmdTuples result = pure (Just (maybe "" affectedRows result.commandTag))
 
 instance IsCancel NativeCancel where
-  cancel (NativeCancel host port pid secret) = do
-    transport <- Transport.connect host port
-    Transport.send transport (cancelRequest pid secret)
-    Transport.close transport
-    pure (Right ())
+  cancel nc = do
+    pending <- readIORef nc.asyncPendingRef
+    if not pending
+      then pure (Right ())
+      else do
+        transport <- Transport.connect nc.host nc.port
+        Transport.send transport (cancelRequest nc.pid nc.secret)
+        Transport.close transport
+        pure (Right ())
 
 -- * Helpers for the 'IsResult' instance
 

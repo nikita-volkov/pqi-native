@@ -120,10 +120,12 @@ sendQueryParams connection sql params resultFormat = do
 sendPrepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO Bool
 sendPrepare connection name sql parameterTypes = do
   pipeline <- inPipeline connection
-  sendAsync connection sql
+  ok <- sendAsync connection sql
     $ if pipeline
       then parseMessage name sql (fromMaybe [] parameterTypes)
       else prepareWrite name sql parameterTypes
+  when (ok && pipeline) $ modifyIORef' connection.pendingParses (+ 1)
+  pure ok
 
 sendQueryPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO Bool
 sendQueryPrepared connection name params resultFormat = do
@@ -213,8 +215,14 @@ getNextResult connection = do
               writeIORef connection.singleRowFields builder.accFields
               pure (Just (NativeResult SingleTuple builder.accFields [values] Nothing Map.empty [] ""))
             else go singleRow builder {accRevRows = values : builder.accRevRows}
-        ParseComplete ->
-          go singleRow builder {accHadResponse = True}
+        ParseComplete -> do
+          parses <- readIORef connection.pendingParses
+          if parses > 0 && pipeStatus /= PipelineOff
+            then do
+              modifyIORef' connection.pendingParses (subtract 1)
+              finishCommand pipeStatus
+              pure (Just (NativeResult CommandOk [] [] Nothing Map.empty [] ""))
+            else go singleRow builder {accHadResponse = True}
         BindComplete ->
           go singleRow builder {accHadResponse = True}
         CloseComplete ->

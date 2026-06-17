@@ -114,12 +114,22 @@ instance IsConnection Connection where
   pipelineSync connection = do
     Connection.sendMessage connection syncMessage
     modifyIORef' connection.pendingSyncs (+ 1)
+    writeIORef connection.asyncPending True
     pure True
   sendFlushRequest connection = Connection.sendMessage connection flushMessage $> True
 
   getCancel connection = do
     key <- readIORef connection.backendKey
-    pure (fmap (\(pid, secret) -> NativeCancel connection.info.host connection.info.port pid secret) key)
+    pure $ fmap
+      (\(pid, secret) ->
+        NativeCancel
+          { host = connection.info.host,
+            port = connection.info.port,
+            pid,
+            secret,
+            asyncPendingRef = connection.asyncPending
+          })
+      key
 
   notifies connection = popFirst connection.pendingNotifications
   disableNoticeReporting connection = writeIORef connection.noticeReporting False
