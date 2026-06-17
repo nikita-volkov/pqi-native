@@ -1,5 +1,8 @@
 # pqi-native
 
+[![Hackage](https://img.shields.io/hackage/v/pqi-native.svg)](https://hackage.haskell.org/package/pqi-native)
+[![Continuous Haddock](https://img.shields.io/badge/haddock-master-blue)](https://nikita-volkov.github.io/pqi-native/)
+
 A pure-Haskell [`pqi`](https://github.com/nikita-volkov/pqi) adapter
 that speaks the PostgreSQL frontend/backend wire protocol directly — no
 dependency on the C `libpq` library.
