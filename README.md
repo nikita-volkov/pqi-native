@@ -7,6 +7,10 @@ A pure-Haskell [`pqi`](https://github.com/nikita-volkov/pqi) adapter
 that speaks the PostgreSQL frontend/backend wire protocol directly — no
 dependency on the C `libpq` library.
 
+`pqi-native` is a port of the PostgreSQL C client library, `libpq`
+(source: <https://github.com/postgres/postgres>). The upstream `libpq` source
+is the direct reference for the implementation.
+
 The byte-level transport (socket I/O, message framing, and the
 serialization/deserialization of wire messages via
 [`ptr-poker`](https://hackage.haskell.org/package/ptr-poker) and
