@@ -270,14 +270,15 @@ getNextResult connection = do
                 else pure Nothing
             _ -> do
               writeIORef connection.pipelineStatus PipelineOn
+              -- A PipelineSync result is its own command boundary: unlike a
+              -- normal command result, libpq does not emit a separating NULL
+              -- after it, so consecutive syncs are reported back-to-back. We
+              -- therefore never set 'pipelineSeparatorPending' here. Only the
+              -- final sync clears 'asyncPending'; an earlier one leaves it set
+              -- so the next 'getNextResult' reads straight on to the next sync.
               remaining <- atomicModifyIORef' connection.pendingSyncs (\n -> (n - 1, n - 1))
-              if remaining == 0
-                then do
-                  writeIORef connection.asyncPending False
-                  pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
-                else do
-                  writeIORef connection.pipelineSeparatorPending True
-                  pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
+              when (remaining == 0) $ writeIORef connection.asyncPending False
+              pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
         _ -> go singleRow builder
 
 -- | Describe a prepared statement.
