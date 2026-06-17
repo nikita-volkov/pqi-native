@@ -20,7 +20,7 @@ module Pqi.Native.LargeObject
 where
 
 import qualified Data.ByteString.Char8 as ByteString.Char8
-import Pqi (Format (..), LoFd (..))
+import Pqi (Format (..))
 import Pqi.Native.Connection (Connection)
 import Pqi.Native.Prelude
 import qualified Pqi.Native.Query as Query
@@ -48,35 +48,35 @@ loExport :: Connection -> Word32 -> FilePath -> IO (Maybe ())
 loExport connection oid path =
   succeeded <$> callText connection "select lo_export($1 :: oid, $2)" [oidParam oid, textParam (ByteString.Char8.pack path)]
 
-loOpen :: Connection -> Word32 -> IOMode -> IO (Maybe LoFd)
+loOpen :: Connection -> Word32 -> IOMode -> IO (Maybe Int32)
 loOpen connection oid mode =
-  fmap (LoFd . fromIntegral)
+  fmap fromIntegral
     . (>>= parseInt)
     <$> callText connection "select lo_open($1 :: oid, $2 :: integer)" [oidParam oid, intParam (ioModeFlag mode)]
 
-loWrite :: Connection -> LoFd -> ByteString -> IO (Maybe Int)
-loWrite connection (LoFd fd) payload =
+loWrite :: Connection -> Int32 -> ByteString -> IO (Maybe Int)
+loWrite connection fd payload =
   (>>= parseInt) <$> callText connection "select lowrite($1 :: integer, $2 :: bytea)" [intParam (fromIntegral fd), byteaParam payload]
 
-loRead :: Connection -> LoFd -> Int -> IO (Maybe ByteString)
-loRead connection (LoFd fd) len =
+loRead :: Connection -> Int32 -> Int -> IO (Maybe ByteString)
+loRead connection fd len =
   callBinary connection "select loread($1 :: integer, $2 :: integer)" [intParam (fromIntegral fd), intParam len]
 
-loSeek :: Connection -> LoFd -> SeekMode -> Int -> IO (Maybe Int)
-loSeek connection (LoFd fd) whence offset =
+loSeek :: Connection -> Int32 -> SeekMode -> Int -> IO (Maybe Int)
+loSeek connection fd whence offset =
   (>>= parseInt)
     <$> callText connection "select lo_lseek($1 :: integer, $2 :: integer, $3 :: integer)" [intParam (fromIntegral fd), intParam offset, intParam (seekFlag whence)]
 
-loTell :: Connection -> LoFd -> IO (Maybe Int)
-loTell connection (LoFd fd) =
+loTell :: Connection -> Int32 -> IO (Maybe Int)
+loTell connection fd =
   (>>= parseInt) <$> callText connection "select lo_tell($1 :: integer)" [intParam (fromIntegral fd)]
 
-loTruncate :: Connection -> LoFd -> Int -> IO (Maybe ())
-loTruncate connection (LoFd fd) len =
+loTruncate :: Connection -> Int32 -> Int -> IO (Maybe ())
+loTruncate connection fd len =
   succeeded <$> callText connection "select lo_truncate($1 :: integer, $2 :: integer)" [intParam (fromIntegral fd), intParam len]
 
-loClose :: Connection -> LoFd -> IO (Maybe ())
-loClose connection (LoFd fd) =
+loClose :: Connection -> Int32 -> IO (Maybe ())
+loClose connection fd =
   succeeded <$> callText connection "select lo_close($1 :: integer)" [intParam (fromIntegral fd)]
 
 loUnlink :: Connection -> Word32 -> IO (Maybe ())
