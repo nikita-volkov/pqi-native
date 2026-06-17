@@ -3,10 +3,8 @@
 
 -- | The native (pure-Haskell) @pqi@ adapter.
 --
--- 'Connection' speaks the PostgreSQL wire protocol directly via the internal
--- @transport@ sub-library. Provides the 'IsConnection' instance. The
--- 'IsResult' and 'IsCancel' instances live in "Pqi.Native.Types"
--- alongside 'NativeResult' and 'NativeCancel' to avoid orphan warnings.
+-- 'Connection' speaks the PostgreSQL wire protocol directly.
+-- Provides the 'IsConnection' instance.
 module Pqi.Native
   ( Connection,
   )

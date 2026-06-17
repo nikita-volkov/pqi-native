@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set package version
-        uses: nikita-volkov/edit-cabal-version.github-action@v1.1.1
+        uses: nikita-volkov/edit-cabal-version.github-action@v1
         with:
           mode: set
           set-value: ${{ inputs.version }}
