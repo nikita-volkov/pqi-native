@@ -127,7 +127,9 @@ instance IsConnection Connection where
             port = connection.info.port,
             pid,
             secret,
-            asyncPendingRef = connection.asyncPending
+            asyncPendingRef = connection.asyncPending,
+            pipelineStatusRef = connection.pipelineStatus,
+            pendingCommandsRef = connection.pendingCommands
           })
       key
 

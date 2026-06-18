@@ -19,10 +19,12 @@ import Pqi
     Format (..),
     IsCancel (..),
     IsResult (..),
+    PipelineStatus (..),
   )
 import Pqi.Native.Prelude
 import qualified Pqi.Native.Transport as Transport
 import Pqi.Native.Transport.Message (FieldDescription (..), cancelRequest)
+import Control.Exception (IOException, try)
 
 -- | A fully materialized result. The native adapter buffers the entire result
 -- in memory, so the accessors are pure lookups and 'unsafeFreeResult' is a
@@ -44,16 +46,26 @@ data NativeResult = NativeResult
 
 -- | A standalone cancellation handle for the native adapter.
 --
--- Carries a reference to the connection's @asyncPending@ flag so the
--- implementation can skip the network round-trip when nothing is actually
--- in flight (avoids a race where a stale cancel signal interrupts the next
--- command sent on the same connection).
+-- Carries references to connection state so the cancel implementation can
+-- decide whether a network round-trip is necessary:
+--
+-- * @asyncPendingRef@: False when nothing is in flight at all — skip the
+--   round-trip entirely.
+-- * @pipelineStatusRef@ + @pendingCommandsRef@: in pipeline mode,
+--   @asyncPending@ stays True even after all @CommandComplete@ messages
+--   have arrived (while @ReadyForQuery@ is still unread).  Sending a cancel
+--   in that window produces a stale signal that can interrupt the very next
+--   command (e.g. the @ABORT@ issued during clean-up).  Checking
+--   @pendingCommands > 0@ instead avoids the stale cancel: once all command
+--   completions are in, @pendingCommands@ is 0 and the server is idle.
 data NativeCancel = NativeCancel
   { host :: ByteString,
     port :: Int,
     pid :: Int32,
     secret :: Int32,
-    asyncPendingRef :: IORef Bool
+    asyncPendingRef :: IORef Bool,
+    pipelineStatusRef :: IORef PipelineStatus,
+    pendingCommandsRef :: IORef Int
   }
 
 -- | Like 'formatResultError' but without a client query text (for
@@ -165,6 +177,10 @@ instance IsCancel NativeCancel where
       else do
         transport <- Transport.connect nc.host nc.port
         Transport.send transport (cancelRequest nc.pid nc.secret)
+        -- Read until EOF to ensure the server has processed the cancel request
+        -- before we close the connection. This matches libpq's PQcancel behavior
+        -- and prevents the cancel signal from racing with the next query.
+        _ <- try @IOException (Transport.readUntilClosed transport)
         Transport.close transport
         pure (Right ())
 

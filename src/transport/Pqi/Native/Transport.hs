@@ -10,6 +10,7 @@ module Pqi.Native.Transport
     receiveFrame,
     socketFd,
     peerIp,
+    readUntilClosed,
   )
 where
 
@@ -93,6 +94,18 @@ receiveFrame transport = do
       then receiveExactly transport bodyLength
       else pure ByteString.empty
   pure (typeByte, body)
+
+-- | Read bytes until the peer closes the connection (EOF), discarding them.
+-- Used by the cancel path to mirror libpq's behaviour: keep the socket open
+-- until the server has read the cancel request and closed its end.
+readUntilClosed :: Transport -> IO ()
+readUntilClosed transport = go
+  where
+    go = do
+      chunk <- Socket.ByteString.recv transport.socket 4096
+      if ByteString.null chunk
+        then pure ()
+        else go
 
 -- | The numeric IP address of the connected peer (e.g. @\"::1\"@ or
 -- @\"127.0.0.1\"@). Throws if the socket has no peer (unconnected).
