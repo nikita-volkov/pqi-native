@@ -8,6 +8,7 @@ module Pqi.Native.Types
   )
 where
 
+import Control.Exception (IOException, try)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.Char (isDigit)
@@ -24,7 +25,6 @@ import Pqi
 import Pqi.Native.Prelude
 import qualified Pqi.Native.Transport as Transport
 import Pqi.Native.Transport.Message (FieldDescription (..), cancelRequest)
-import Control.Exception (IOException, try)
 
 -- | A fully materialized result. The native adapter buffers the entire result
 -- in memory, so the accessors are pure lookups and 'unsafeFreeResult' is a

@@ -121,10 +121,10 @@ parseUri withoutScheme =
 pctDecode :: ByteString -> ByteString
 pctDecode bs
   | ByteString.null bs = ByteString.empty
-  | ByteString.head bs == 0x25
-    , ByteString.length bs >= 3
-    , Just hi <- hexVal (ByteString.index bs 1)
-    , Just lo <- hexVal (ByteString.index bs 2) =
+  | ByteString.head bs == 0x25,
+    ByteString.length bs >= 3,
+    Just hi <- hexVal (ByteString.index bs 1),
+    Just lo <- hexVal (ByteString.index bs 2) =
       ByteString.singleton (fromIntegral (hi * 16 + lo)) <> pctDecode (ByteString.drop 3 bs)
   | otherwise = ByteString.singleton (ByteString.head bs) <> pctDecode (ByteString.tail bs)
   where

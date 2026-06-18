@@ -120,18 +120,20 @@ instance IsConnection Connection where
 
   getCancel connection = do
     key <- readIORef connection.backendKey
-    pure $ fmap
-      (\(pid, secret) ->
-        NativeCancel
-          { host = connection.info.host,
-            port = connection.info.port,
-            pid,
-            secret,
-            asyncPendingRef = connection.asyncPending,
-            pipelineStatusRef = connection.pipelineStatus,
-            pendingCommandsRef = connection.pendingCommands
-          })
-      key
+    pure
+      $ fmap
+        ( \(pid, secret) ->
+            NativeCancel
+              { host = connection.info.host,
+                port = connection.info.port,
+                pid,
+                secret,
+                asyncPendingRef = connection.asyncPending,
+                pipelineStatusRef = connection.pipelineStatus,
+                pendingCommandsRef = connection.pendingCommands
+              }
+        )
+        key
 
   notifies connection = popFirst connection.pendingNotifications
   disableNoticeReporting connection = writeIORef connection.noticeReporting False

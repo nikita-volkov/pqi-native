@@ -120,10 +120,11 @@ sendQueryParams connection sql params resultFormat = do
 sendPrepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO Bool
 sendPrepare connection name sql parameterTypes = do
   pipeline <- inPipeline connection
-  ok <- sendAsync connection sql
-    $ if pipeline
-      then parseMessage name sql (fromMaybe [] parameterTypes)
-      else prepareWrite name sql parameterTypes
+  ok <-
+    sendAsync connection sql
+      $ if pipeline
+        then parseMessage name sql (fromMaybe [] parameterTypes)
+        else prepareWrite name sql parameterTypes
   when (ok && pipeline) $ modifyIORef' connection.pendingParses (+ 1)
   pure ok
 
