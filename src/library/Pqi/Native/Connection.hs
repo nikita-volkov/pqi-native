@@ -27,6 +27,8 @@ import qualified Pqi.Native.Transport as Transport
 import Pqi.Native.Transport.Message
 import Pqi.Native.Types (formatErrorFields)
 import qualified PtrPoker.Write as Poker
+import System.Environment (lookupEnv)
+import System.Posix.User (getEffectiveUserName)
 
 -- | Parsed connection parameters (the @key=value@ subset we support).
 data ConnInfo = ConnInfo
@@ -40,15 +42,30 @@ data ConnInfo = ConnInfo
 
 -- | Parse a conninfo string in either @key=value@ or @postgresql:\/\/@ URI
 -- format. Unquoted key=value values only; URI values are percent-decoded.
--- Environment variables and @.pgpass@ are not supported.
-parseConnInfo :: ByteString -> ConnInfo
-parseConnInfo raw
-  | "postgresql://" `ByteString.isPrefixOf` raw = parseUri (ByteString.drop 13 raw)
-  | "postgres://" `ByteString.isPrefixOf` raw = parseUri (ByteString.drop 11 raw)
-  | otherwise = parseKeyValue raw
+-- @.pgpass@ is not supported. When @user@ is omitted it is resolved like libpq
+-- (see 'defaultUser'), which is why this lives in 'IO'.
+parseConnInfo :: ByteString -> IO ConnInfo
+parseConnInfo raw = do
+  dfltUser <- defaultUser
+  pure
+    if
+      | "postgresql://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 13 raw)
+      | "postgres://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 11 raw)
+      | otherwise -> parseKeyValue dfltUser raw
 
-parseKeyValue :: ByteString -> ConnInfo
-parseKeyValue raw =
+-- | Resolve the default @user@ the way libpq does (@conninfo_add_defaults@ /
+-- @pg_fe_getauthname@ in @fe-connect.c@): the @PGUSER@ environment variable if
+-- set and non-empty, otherwise the operating-system login name
+-- (@getpwuid(geteuid())->pw_name@ on Unix).
+defaultUser :: IO ByteString
+defaultUser = do
+  pguser <- lookupEnv "PGUSER"
+  case pguser of
+    Just u | not (null u) -> pure (ByteString.Char8.pack u)
+    _ -> ByteString.Char8.pack <$> getEffectiveUserName
+
+parseKeyValue :: ByteString -> ByteString -> ConnInfo
+parseKeyValue dfltUser raw =
   ConnInfo
     { host = get "host" "localhost",
       port = maybe 5432 fst (ByteString.Char8.readInt (get "port" "5432")),
@@ -60,7 +77,7 @@ parseKeyValue raw =
     pairs = mapMaybe toPair (ByteString.Char8.words raw)
     settings = Map.fromList pairs
     get key def = Map.findWithDefault def key settings
-    theUser = get "user" "postgres"
+    theUser = get "user" dfltUser
     toPair token = case ByteString.Char8.break (== '=') token of
       (key, value)
         | not (ByteString.null value) -> Just (key, ByteString.drop 1 value)
@@ -69,8 +86,8 @@ parseKeyValue raw =
 -- | Parse the authority+path portion of a @postgresql://@ URI (scheme already
 -- stripped). Handles @[user[:password]@][host[:port]][/dbname]@; ignores query
 -- parameters other than what appears in those components.
-parseUri :: ByteString -> ConnInfo
-parseUri withoutScheme =
+parseUri :: ByteString -> ByteString -> ConnInfo
+parseUri dfltUser withoutScheme =
   ConnInfo {host, port, user, database, password}
   where
     -- Split off optional "userinfo@" prefix. The '@' is unambiguous in this
@@ -80,7 +97,7 @@ parseUri withoutScheme =
       Nothing -> (Nothing, withoutScheme)
 
     (user, password) = case userinfoMay of
-      Nothing -> ("postgres", "")
+      Nothing -> (dfltUser, "")
       Just ui -> case ByteString.elemIndex 0x3a ui of
         Just c -> (pctDecode (ByteString.take c ui), pctDecode (ByteString.drop (c + 1) ui))
         Nothing -> (pctDecode ui, "")
@@ -214,7 +231,7 @@ setError connection message = do
 -- 'ConnectionBad' connection rather than throwing.
 establish :: ByteString -> IO Connection
 establish conninfo = do
-  let info = parseConnInfo conninfo
+  info <- parseConnInfo conninfo
   transportResult <- try @IOException (Transport.connect info.host info.port)
   case transportResult of
     Left err -> do
@@ -233,7 +250,8 @@ establish conninfo = do
 nullConnection :: IO Connection
 nullConnection = do
   transport <- Transport.unconnected
-  conn <- newConnection True transport (parseConnInfo "")
+  info <- parseConnInfo ""
+  conn <- newConnection True transport info
   writeIORef conn.lastError (Just "connection pointer is NULL\n")
   pure conn
 
