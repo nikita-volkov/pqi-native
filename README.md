@@ -21,8 +21,8 @@ reference connection against the same database and asserts exact equality.
 
 ## Status
 
-All classes are implemented. Verified against the `postgresql-libpq` reference
-via the conformance differential suite.
+The full `Pqi.Connection` capability record is implemented. Verified against
+the `postgresql-libpq` reference via the conformance differential suite.
 
 Authentication: **trust**, **MD5**, and **SCRAM-SHA-256** are implemented. SCRAM
 is verified against a password-auth PostgreSQL 17 container (which defaults to
