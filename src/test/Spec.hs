@@ -4,11 +4,10 @@
 -- SCRAM) against the FFI reference, and tears the container down again.
 module Main (main) where
 
-import Data.Proxy (Proxy (..))
 import Pqi.Conformance (specs)
-import Pqi.Native (Connection)
+import qualified Pqi.Native
 import Test.Hspec
 import Prelude
 
 main :: IO ()
-main = hspec (specs (Proxy @Connection))
+main = hspec (specs Pqi.Native.adapter)

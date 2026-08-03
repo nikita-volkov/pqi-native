@@ -1,8 +1,11 @@
 -- | Internal types for the native adapter, separated from 'Connection.hs' to
--- avoid orphan-instance warnings for 'IsResult' and 'IsCancel'.
+-- keep 'mkResult'\/'mkCancel' (and the pure formatting helpers they build on)
+-- next to the data they close over.
 module Pqi.Native.Types
   ( NativeResult (..),
     NativeCancel (..),
+    mkResult,
+    mkCancel,
     formatErrorFields,
     formatResultError,
   )
@@ -15,12 +18,12 @@ import Data.Char (isDigit)
 import Data.List (findIndex)
 import qualified Data.Map.Strict as Map
 import Pqi
-  ( ExecStatus (..),
+  ( Cancel (..),
+    ExecStatus (..),
     FieldCode (..),
     Format (..),
-    IsCancel (..),
-    IsResult (..),
     PipelineStatus (..),
+    Result (..),
   )
 import Pqi.Native.Prelude
 import qualified Pqi.Native.Transport as Transport
@@ -137,54 +140,62 @@ readPositiveInt bs = case ByteString.Char8.readInt bs of
   Just (n, _) | n > 0 -> Just n
   _ -> Nothing
 
-instance IsResult NativeResult where
-  resultStatus result = pure result.status
-  resultErrorMessage result = pure (Just (formatResultError result.queryText result.errorFields))
-  resultErrorField result field = pure (Map.lookup (fieldCodeByte field) result.errorFields)
-  unsafeFreeResult _ = pure ()
-  ntuples result = pure (fromIntegral (length result.rows))
-  nfields result = pure (fromIntegral (length result.fields))
-  fname result column = pure $ do
-    fd <- atMay result.fields column
-    if ByteString.null fd.name then Nothing else Just fd.name
-  fnumber result name =
-    pure (fromIntegral <$> findIndex (\field -> field.name == folded) result.fields)
-    where
-      folded = foldIdentifier name
-  ftable result column = pure (maybe 0 (.tableOid) (atMay result.fields column))
-  ftablecol result column =
-    pure (maybe 0 (\field -> fromIntegral (field.columnAttributeNumber :: Int16)) (atMay result.fields column))
-  fformat result column =
-    pure (maybe Text (\field -> formatOf field.formatCode) (atMay result.fields column))
-  ftype result column = pure (maybe 0 (.typeOid) (atMay result.fields column))
-  fmod result column = pure (maybe 0 (\field -> fromIntegral (field.typeModifier :: Int32)) (atMay result.fields column))
-  fsize result column = pure (maybe 0 (\field -> fromIntegral (field.typeSize :: Int16)) (atMay result.fields column))
-  getvalue result row column = pure (join (cellAt result row column))
-  getvalue' result row column = pure (join (cellAt result row column))
-  getisnull result row column = pure (maybe True isNothing (cellAt result row column))
-  getlength result row column =
-    pure (maybe 0 (maybe 0 ByteString.length) (cellAt result row column))
-  nparams result = pure (fromIntegral (length result.paramOids))
-  paramtype result index = pure (fromMaybe 0 (atMay result.paramOids index))
-  cmdStatus result = pure (Just (fromMaybe "" result.commandTag))
-  cmdTuples result = pure (Just (maybe "" affectedRows result.commandTag))
+-- | Build a 'Result' whose fields close over the given fully materialized
+-- 'NativeResult'.
+mkResult :: NativeResult -> Result
+mkResult result =
+  Result
+    { resultStatus = pure result.status,
+      resultErrorMessage = pure (Just (formatResultError result.queryText result.errorFields)),
+      resultErrorField = \field -> pure (Map.lookup (fieldCodeByte field) result.errorFields),
+      unsafeFreeResult = pure (),
+      ntuples = pure (fromIntegral (length result.rows)),
+      nfields = pure (fromIntegral (length result.fields)),
+      fname = \column -> pure $ do
+        fd <- atMay result.fields column
+        if ByteString.null fd.name then Nothing else Just fd.name,
+      fnumber = \name ->
+        pure (fromIntegral <$> findIndex (\field -> field.name == foldIdentifier name) result.fields),
+      ftable = \column -> pure (maybe 0 (.tableOid) (atMay result.fields column)),
+      ftablecol = \column ->
+        pure (maybe 0 (\field -> fromIntegral (field.columnAttributeNumber :: Int16)) (atMay result.fields column)),
+      fformat = \column ->
+        pure (maybe Text (\field -> formatOf field.formatCode) (atMay result.fields column)),
+      ftype = \column -> pure (maybe 0 (.typeOid) (atMay result.fields column)),
+      fmod = \column ->
+        pure (maybe 0 (\field -> fromIntegral (field.typeModifier :: Int32)) (atMay result.fields column)),
+      fsize = \column ->
+        pure (maybe 0 (\field -> fromIntegral (field.typeSize :: Int16)) (atMay result.fields column)),
+      getvalue = \row column -> pure (join (cellAt result row column)),
+      getvalue' = \row column -> pure (join (cellAt result row column)),
+      getisnull = \row column -> pure (maybe True isNothing (cellAt result row column)),
+      getlength = \row column -> pure (maybe 0 (maybe 0 ByteString.length) (cellAt result row column)),
+      nparams = pure (fromIntegral (length result.paramOids)),
+      paramtype = \index -> pure (fromMaybe 0 (atMay result.paramOids index)),
+      cmdStatus = pure (Just (fromMaybe "" result.commandTag)),
+      cmdTuples = pure (Just (maybe "" affectedRows result.commandTag))
+    }
 
-instance IsCancel NativeCancel where
-  cancel nc = do
-    pending <- readIORef nc.asyncPendingRef
-    if not pending
-      then pure (Right ())
-      else do
-        transport <- Transport.connect nc.host nc.port
-        Transport.send transport (cancelRequest nc.pid nc.secret)
-        -- Read until EOF to ensure the server has processed the cancel request
-        -- before we close the connection. This matches libpq's PQcancel behavior
-        -- and prevents the cancel signal from racing with the next query.
-        _ <- try @IOException (Transport.readUntilClosed transport)
-        Transport.close transport
-        pure (Right ())
+-- | Build a 'Cancel' whose field closes over the given 'NativeCancel'.
+mkCancel :: NativeCancel -> Cancel
+mkCancel nc =
+  Cancel
+    { cancel = do
+        pending <- readIORef nc.asyncPendingRef
+        if not pending
+          then pure (Right ())
+          else do
+            transport <- Transport.connect nc.host nc.port
+            Transport.send transport (cancelRequest nc.pid nc.secret)
+            -- Read until EOF to ensure the server has processed the cancel request
+            -- before we close the connection. This matches libpq's PQcancel behavior
+            -- and prevents the cancel signal from racing with the next query.
+            _ <- try @IOException (Transport.readUntilClosed transport)
+            Transport.close transport
+            pure (Right ())
+    }
 
--- * Helpers for the 'IsResult' instance
+-- * Helpers for 'mkResult'
 
 atMay :: [a] -> Int32 -> Maybe a
 atMay xs i
