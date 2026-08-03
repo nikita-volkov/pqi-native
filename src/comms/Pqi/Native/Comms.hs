@@ -29,9 +29,9 @@ import Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import Data.ByteString (ByteString)
 import Data.Int (Int16, Int32)
 import Data.Word (Word32, Word8)
+import Prelude
 import qualified PtrPeeker as Peeker
 import qualified PtrPoker.Write as Poker
-import Prelude
 
 -- | A semantic decoding failure (as opposed to a \"need more bytes\" framing
 -- shortfall, which the transport handles separately).

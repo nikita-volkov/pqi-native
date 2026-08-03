@@ -7,10 +7,10 @@ where
 import Data.ByteString (ByteString)
 import Data.Either (fromRight)
 import Data.Word (Word8)
+import Prelude
 import PtrPeeker (Variable, fixed, hasMore, runVariableOnByteString, unsignedInt1)
 import PtrPoker.Write (Write)
 import qualified PtrPoker.Write as Write
-import Prelude
 
 -- | Convert the textual representation of a @bytea@ value, as produced by
 -- the server, back into raw bytes. Both the modern @\\x@ hex format (lowercase
@@ -24,9 +24,9 @@ import Prelude
 -- the first NUL byte terminates processing.
 unescapeBytea :: ByteString -> ByteString
 unescapeBytea input =
-  Write.toByteString $
-    fromRight mempty $
-      runVariableOnByteString decoder input
+  Write.toByteString
+    $ fromRight mempty
+    $ runVariableOnByteString decoder input
 
 -- Inline NUL truncation and \x prefix detection so no intermediate ByteStrings
 -- are allocated before dispatching to the format-specific decoder.

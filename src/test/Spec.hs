@@ -6,8 +6,8 @@ module Main (main) where
 
 import Pqi.Conformance (specs)
 import qualified Pqi.Native
-import Test.Hspec
 import Prelude
+import Test.Hspec
 
 main :: IO ()
 main = hspec (specs Pqi.Native.adapter)
