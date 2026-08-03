@@ -47,13 +47,13 @@ prepareWrite name sql parameterTypes =
 asyncParamsWrite :: ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> Poker.Write
 asyncParamsWrite sql params resultFormat =
   parseMessage "" sql (fmap paramOid params)
-    <> bindMessage "" "" (fmap paramFormat params) (fmap paramValue params) [formatCode resultFormat]
+    <> bindMessage "" "" (fmap paramFormat params) (fmap paramValue params) [formatCodeOf resultFormat]
     <> describePortalMessage ""
     <> executeMessage "" 0
 
 asyncPreparedWrite :: ByteString -> [Maybe (ByteString, Format)] -> Format -> Poker.Write
 asyncPreparedWrite name params resultFormat =
-  bindMessage "" name (fmap boundFormat params) (fmap boundValue params) [formatCode resultFormat]
+  bindMessage "" name (fmap boundFormat params) (fmap boundValue params) [formatCodeOf resultFormat]
     <> describePortalMessage ""
     <> executeMessage "" 0
 
@@ -88,20 +88,20 @@ execPrepared connection name params resultFormat = withReady connection do
 -- | Send a write in async mode, tracking pending commands for pipeline abort.
 sendAsync :: Connection -> ByteString -> Poker.Write -> IO Bool
 sendAsync connection sql write = do
-  status <- readIORef connection.connStatus
+  status <- readIORef (connStatus connection)
   case status of
     ConnectionOk -> do
       sendMessage connection write
-      writeIORef connection.currentQuery sql
-      writeIORef connection.asyncPending True
-      pipeStatus <- readIORef connection.pipelineStatus
-      when (pipeStatus /= PipelineOff) $ modifyIORef' connection.pendingCommands (+ 1)
+      writeIORef (currentQuery connection) sql
+      writeIORef (asyncPending connection) True
+      pipeStatus <- readIORef (pipelineStatus connection)
+      when (pipeStatus /= PipelineOff) $ modifyIORef' (pendingCommands connection) (+ 1)
       pure True
     _ -> pure False
 
 -- | Whether the connection is in pipeline mode.
 inPipeline :: Connection -> IO Bool
-inPipeline connection = (/= PipelineOff) <$> readIORef connection.pipelineStatus
+inPipeline connection = (/= PipelineOff) <$> readIORef (pipelineStatus connection)
 
 -- Simple query protocol: no Sync needed (server sends ReadyForQuery on its own).
 sendQuery :: Connection -> ByteString -> IO Bool
@@ -125,7 +125,7 @@ sendPrepare connection name sql parameterTypes = do
       $ if pipeline
         then parseMessage name sql (fromMaybe [] parameterTypes)
         else prepareWrite name sql parameterTypes
-  when (ok && pipeline) $ modifyIORef' connection.pendingParses (+ 1)
+  when (ok && pipeline) $ modifyIORef' (pendingParses connection) (+ 1)
   pure ok
 
 sendQueryPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO Bool
@@ -162,18 +162,18 @@ sendDescribePortal connection name = do
 -- 'SingleTuple' result followed by a final 'TuplesOk' with no rows.
 getNextResult :: Connection -> IO (Maybe NativeResult)
 getNextResult connection = do
-  pending <- readIORef connection.asyncPending
+  pending <- readIORef (asyncPending connection)
   if not pending
     then pure Nothing
     else do
-      sepPending <- readIORef connection.pipelineSeparatorPending
+      sepPending <- readIORef (pipelineSeparatorPending connection)
       if sepPending
         then do
-          writeIORef connection.pipelineSeparatorPending False
+          writeIORef (pipelineSeparatorPending connection) False
           pure Nothing
         else do
-          singleRow <- readIORef connection.singleRowMode
-          cachedFields <- readIORef connection.singleRowFields
+          singleRow <- readIORef (singleRowMode connection)
+          cachedFields <- readIORef (singleRowFields connection)
           let initBuilder =
                 if singleRow && not (null cachedFields)
                   then emptyBuilder {accFields = cachedFields, accSawRowDescription = True}
@@ -184,20 +184,20 @@ getNextResult connection = do
     -- pipeline mode.  Called when a "terminal" result is about to be returned.
     finishCommand pipeStatus = do
       when (pipeStatus /= PipelineOff) $ do
-        modifyIORef' connection.pendingCommands (subtract 1)
-        writeIORef connection.pipelineSeparatorPending True
+        modifyIORef' (pendingCommands connection) (subtract 1)
+        writeIORef (pipelineSeparatorPending connection) True
 
     go singleRow builder = do
-      pipeStatus <- readIORef connection.pipelineStatus
+      pipeStatus <- readIORef (pipelineStatus connection)
       -- In aborted pipeline mode, if the server has already sent nothing for
       -- the remaining commands (it discards them after the first error), we
       -- generate synthetic PipelineAbort results for each outstanding command
       -- rather than blocking on a wire read that will never come.
-      pending <- readIORef connection.pendingCommands
+      pending <- readIORef (pendingCommands connection)
       if pipeStatus == PipelineAborted && pending > 0
         then do
-          modifyIORef' connection.pendingCommands (subtract 1)
-          writeIORef connection.pipelineSeparatorPending True
+          modifyIORef' (pendingCommands connection) (subtract 1)
+          writeIORef (pipelineSeparatorPending connection) True
           pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] ""))
         else readAndProcess singleRow builder pipeStatus
 
@@ -213,14 +213,14 @@ getNextResult connection = do
         DataRow values ->
           if singleRow
             then do
-              writeIORef connection.singleRowFields builder.accFields
-              pure (Just (NativeResult SingleTuple builder.accFields [values] Nothing Map.empty [] ""))
-            else go singleRow builder {accRevRows = values : builder.accRevRows}
+              writeIORef (singleRowFields connection) (accFields builder)
+              pure (Just (NativeResult SingleTuple (accFields builder) [values] Nothing Map.empty [] ""))
+            else go singleRow builder {accRevRows = values : (accRevRows builder)}
         ParseComplete -> do
-          parses <- readIORef connection.pendingParses
+          parses <- readIORef (pendingParses connection)
           if parses > 0 && pipeStatus /= PipelineOff
             then do
-              modifyIORef' connection.pendingParses (subtract 1)
+              modifyIORef' (pendingParses connection) (subtract 1)
               finishCommand pipeStatus
               pure (Just (NativeResult CommandOk [] [] Nothing Map.empty [] ""))
             else go singleRow builder {accHadResponse = True}
@@ -231,16 +231,16 @@ getNextResult connection = do
         CommandComplete tag -> do
           if singleRow
             then do
-              writeIORef connection.singleRowMode False
-              writeIORef connection.singleRowFields []
-              writeIORef connection.lastError (Just "")
-              pure (Just (NativeResult TuplesOk builder.accFields [] (Just tag) Map.empty [] ""))
+              writeIORef (singleRowMode connection) False
+              writeIORef (singleRowFields connection) []
+              writeIORef (lastError connection) (Just "")
+              pure (Just (NativeResult TuplesOk (accFields builder) [] (Just tag) Map.empty [] ""))
             else do
-              writeIORef connection.lastError (Just "")
+              writeIORef (lastError connection) (Just "")
               finishCommand pipeStatus
               pure (Just (commandResult builder (Just tag)))
         EmptyQueryResponse -> do
-          writeIORef connection.lastError (Just "")
+          writeIORef (lastError connection) (Just "")
           finishCommand pipeStatus
           pure (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
         ErrorResponse fs -> do
@@ -252,33 +252,33 @@ getNextResult connection = do
               finishCommand pipeStatus
               pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] ""))
             PipelineOn -> do
-              writeIORef connection.pipelineStatus PipelineAborted
+              writeIORef (pipelineStatus connection) PipelineAborted
               finishCommand PipelineOn
               pure (Just (NativeResult FatalError [] [] Nothing errMap [] ""))
             PipelineOff -> do
-              sql <- readIORef connection.currentQuery
-              writeIORef connection.lastError (Just (formatResultError sql errMap))
+              sql <- readIORef (currentQuery connection)
+              writeIORef (lastError connection) (Just (formatResultError sql errMap))
               pure (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
         PortalSuspended ->
           pure (Just (commandResult builder Nothing))
         ReadyForQuery txState -> do
-          writeIORef connection.txStatus txState
+          writeIORef (txStatus connection) txState
           case pipeStatus of
             PipelineOff -> do
-              writeIORef connection.asyncPending False
-              if builder.accHadResponse
+              writeIORef (asyncPending connection) False
+              if (accHadResponse builder)
                 then pure (Just (describeResult builder))
                 else pure Nothing
             _ -> do
-              writeIORef connection.pipelineStatus PipelineOn
+              writeIORef (pipelineStatus connection) PipelineOn
               -- A PipelineSync result is its own command boundary: unlike a
               -- normal command result, libpq does not emit a separating NULL
               -- after it, so consecutive syncs are reported back-to-back. We
               -- therefore never set 'pipelineSeparatorPending' here. Only the
               -- final sync clears 'asyncPending'; an earlier one leaves it set
               -- so the next 'getNextResult' reads straight on to the next sync.
-              remaining <- atomicModifyIORef' connection.pendingSyncs (\n -> (n - 1, n - 1))
-              when (remaining == 0) $ writeIORef connection.asyncPending False
+              remaining <- atomicModifyIORef' (pendingSyncs connection) (\n -> (n - 1, n - 1))
+              when (remaining == 0) $ writeIORef (asyncPending connection) False
               pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
         _ -> go singleRow builder
 
@@ -300,19 +300,21 @@ paramOid :: Maybe (Word32, ByteString, Format) -> Word32
 paramOid = maybe 0 (\(oid, _, _) -> oid)
 
 paramFormat :: Maybe (Word32, ByteString, Format) -> Int16
-paramFormat = maybe 0 (\(_, _, format) -> formatCode format)
+paramFormat = maybe 0 (\(_, _, format) -> formatCodeOf format)
 
 paramValue :: Maybe (Word32, ByteString, Format) -> Maybe ByteString
 paramValue = fmap (\(_, value, _) -> value)
 
 boundFormat :: Maybe (ByteString, Format) -> Int16
-boundFormat = maybe 0 (formatCode . snd)
+boundFormat = maybe 0 (formatCodeOf . snd)
 
 boundValue :: Maybe (ByteString, Format) -> Maybe ByteString
 boundValue = fmap fst
 
-formatCode :: Format -> Int16
-formatCode = \case
+-- | Renamed from @formatCode@ to avoid clashing with 'FieldDescription's
+-- @formatCode@ field now that 'DuplicateRecordFields' is no longer enabled.
+formatCodeOf :: Format -> Int16
+formatCodeOf = \case
   Text -> 0
   Binary -> 1
 
@@ -322,7 +324,7 @@ formatCode = \case
 -- when the connection is not usable.
 withReady :: Connection -> IO (Maybe a) -> IO (Maybe a)
 withReady connection action = do
-  status <- readIORef connection.connStatus
+  status <- readIORef (connStatus connection)
   case status of
     ConnectionOk -> action
     _ -> pure Nothing
@@ -350,16 +352,16 @@ collectSimple connection sql = go emptyBuilder []
       message <- nextMessage connection
       case message of
         RowDescription fs -> go builder {accFields = fs, accSawRowDescription = True} acc
-        DataRow values -> go builder {accRevRows = values : builder.accRevRows} acc
+        DataRow values -> go builder {accRevRows = values : (accRevRows builder)} acc
         CommandComplete tag -> do
-          writeIORef connection.lastError (Just "")
+          writeIORef (lastError connection) (Just "")
           go emptyBuilder (commandResult builder (Just tag) : acc)
         EmptyQueryResponse -> do
-          writeIORef connection.lastError (Just "")
+          writeIORef (lastError connection) (Just "")
           go emptyBuilder (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" : acc)
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
-          writeIORef connection.lastError (Just (formatResultError sql errMap))
+          writeIORef (lastError connection) (Just (formatResultError sql errMap))
           go emptyBuilder (NativeResult FatalError [] [] Nothing errMap [] sql : acc)
         CopyInResponse _ formats ->
           let fields = map copyField formats
@@ -368,7 +370,7 @@ collectSimple connection sql = go emptyBuilder []
           let fields = map copyField formats
            in pure (reverse (NativeResult CopyOut fields [] Nothing Map.empty [] "" : acc))
         ReadyForQuery txState -> do
-          writeIORef connection.txStatus txState
+          writeIORef (txStatus connection) txState
           pure (reverse acc)
         _ -> go builder acc
 
@@ -382,23 +384,23 @@ collectExtended connection sql = go emptyBuilder Nothing
         RowDescription fs -> go builder {accFields = fs, accSawRowDescription = True} finished
         ParameterDescription oids -> go builder {accParamOids = oids} finished
         NoData -> go builder finished
-        DataRow values -> go builder {accRevRows = values : builder.accRevRows} finished
+        DataRow values -> go builder {accRevRows = values : (accRevRows builder)} finished
         ParseComplete -> go builder finished
         BindComplete -> go builder finished
         CloseComplete -> go builder finished
         PortalSuspended -> go emptyBuilder (finished <|> Just (commandResult builder Nothing))
         CommandComplete tag -> do
-          writeIORef connection.lastError (Just "")
+          writeIORef (lastError connection) (Just "")
           go emptyBuilder (Just (commandResult builder (Just tag)))
         EmptyQueryResponse -> do
-          writeIORef connection.lastError (Just "")
+          writeIORef (lastError connection) (Just "")
           go emptyBuilder (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
-          writeIORef connection.lastError (Just (formatResultError sql errMap))
+          writeIORef (lastError connection) (Just (formatResultError sql errMap))
           go emptyBuilder (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
         ReadyForQuery txState -> do
-          writeIORef connection.txStatus txState
+          writeIORef (txStatus connection) txState
           pure (fromMaybe (describeResult builder) finished)
         _ -> go builder finished
 
@@ -407,12 +409,12 @@ collectExtended connection sql = go emptyBuilder Nothing
 commandResult :: Builder -> Maybe ByteString -> NativeResult
 commandResult builder tag =
   NativeResult
-    (if builder.accSawRowDescription then TuplesOk else CommandOk)
-    builder.accFields
-    (reverse builder.accRevRows)
+    (if (accSawRowDescription builder) then TuplesOk else CommandOk)
+    (accFields builder)
+    (reverse (accRevRows builder))
     tag
     Map.empty
-    builder.accParamOids
+    (accParamOids builder)
     ""
 
 -- | A result with no command completion (a @Describe@\/@Parse@-only flow):
@@ -421,11 +423,11 @@ describeResult :: Builder -> NativeResult
 describeResult builder =
   NativeResult
     CommandOk
-    builder.accFields
-    (reverse builder.accRevRows)
+    (accFields builder)
+    (reverse (accRevRows builder))
     Nothing
     Map.empty
-    builder.accParamOids
+    (accParamOids builder)
     ""
 
 lastMaybe :: [a] -> Maybe a

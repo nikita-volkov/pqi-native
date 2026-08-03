@@ -48,31 +48,31 @@ mkConnection :: Connection -> Pqi.Connection
 mkConnection connection =
   Pqi.Connection
     { Pqi.connectPoll = pure Pqi.PollingOk,
-      Pqi.isNullConnection = connection.isNull,
-      Pqi.finish = readIORef connection.transport >>= Transport.close,
+      Pqi.isNullConnection = (Connection.isNull connection),
+      Pqi.finish = readIORef (Connection.transport connection) >>= Transport.close,
       Pqi.reset = Connection.reconnect connection,
       Pqi.resetStart = Connection.reconnect connection $> True,
       Pqi.resetPoll = pure Pqi.PollingOk,
-      Pqi.db = pure (Just connection.info.database),
-      Pqi.user = pure (Just connection.info.user),
-      Pqi.pass = pure (Just connection.info.password),
-      Pqi.host = pure (Just connection.info.host),
-      Pqi.port = pure (Just (ByteString.Char8.pack (show connection.info.port))),
+      Pqi.db = pure (Just (Connection.database (Connection.info connection))),
+      Pqi.user = pure (Just (Connection.user (Connection.info connection))),
+      Pqi.pass = pure (Just (Connection.password (Connection.info connection))),
+      Pqi.host = pure (Just (Connection.host (Connection.info connection))),
+      Pqi.port = pure (Just (ByteString.Char8.pack (show (Connection.port (Connection.info connection))))),
       Pqi.options = pure (Just ""),
-      Pqi.status = readIORef connection.connStatus,
-      Pqi.transactionStatus = transactionStatusOf <$> readIORef connection.txStatus,
-      Pqi.parameterStatus = \name -> Map.lookup name <$> readIORef connection.parameters,
+      Pqi.status = readIORef (Connection.connStatus connection),
+      Pqi.transactionStatus = transactionStatusOf <$> readIORef (Connection.txStatus connection),
+      Pqi.parameterStatus = \name -> Map.lookup name <$> readIORef (Connection.parameters connection),
       Pqi.protocolVersion = pure 3,
       Pqi.serverVersion =
-        maybe 0 parseServerVersion . Map.lookup "server_version" <$> readIORef connection.parameters,
-      Pqi.errorMessage = readIORef connection.lastError,
+        maybe 0 parseServerVersion . Map.lookup "server_version" <$> readIORef (Connection.parameters connection),
+      Pqi.errorMessage = readIORef (Connection.lastError connection),
       Pqi.socket = do
-        transport <- readIORef connection.transport
+        transport <- readIORef (Connection.transport connection)
         fd <- Transport.socketFd transport
         pure (Just (fromIntegral fd :: Fd)),
-      Pqi.backendPID = maybe 0 fst <$> readIORef connection.backendKey,
+      Pqi.backendPID = maybe 0 fst <$> readIORef (Connection.backendKey connection),
       Pqi.connectionNeedsPassword = pure False,
-      Pqi.connectionUsedPassword = pure (not (ByteString.null connection.info.password)),
+      Pqi.connectionUsedPassword = pure (not (ByteString.null (Connection.password (Connection.info connection)))),
       Pqi.exec = \sql -> fmap mkResult <$> Query.exec connection sql,
       Pqi.execParams = \sql params resultFormat ->
         fmap mkResult <$> Query.execParams connection sql params resultFormat,
@@ -100,52 +100,52 @@ mkConnection connection =
       Pqi.getResult = fmap mkResult <$> Query.getNextResult connection,
       Pqi.consumeInput = pure True,
       Pqi.isBusy = pure False,
-      Pqi.setnonblocking = \flag -> writeIORef connection.nonblocking flag $> True,
-      Pqi.isnonblocking = readIORef connection.nonblocking,
+      Pqi.setnonblocking = \flag -> writeIORef (Connection.nonblocking connection) flag $> True,
+      Pqi.isnonblocking = readIORef (Connection.nonblocking connection),
       Pqi.setSingleRowMode = do
-        pending <- readIORef connection.asyncPending
+        pending <- readIORef (Connection.asyncPending connection)
         if pending
-          then writeIORef connection.singleRowMode True $> True
+          then writeIORef (Connection.singleRowMode connection) True $> True
           else pure False,
       Pqi.flush = pure Pqi.FlushOk,
-      Pqi.pipelineStatus = readIORef connection.pipelineStatus,
-      Pqi.enterPipelineMode = writeIORef connection.pipelineStatus Pqi.PipelineOn $> True,
+      Pqi.pipelineStatus = readIORef (Connection.pipelineStatus connection),
+      Pqi.enterPipelineMode = writeIORef (Connection.pipelineStatus connection) Pqi.PipelineOn $> True,
       Pqi.exitPipelineMode = do
-        pending <- readIORef connection.asyncPending
+        pending <- readIORef (Connection.asyncPending connection)
         if pending
           then pure False
-          else writeIORef connection.pipelineStatus Pqi.PipelineOff $> True,
+          else writeIORef (Connection.pipelineStatus connection) Pqi.PipelineOff $> True,
       Pqi.pipelineSync = do
         Connection.sendMessage connection syncMessage
-        modifyIORef' connection.pendingSyncs (+ 1)
-        writeIORef connection.asyncPending True
+        modifyIORef' (Connection.pendingSyncs connection) (+ 1)
+        writeIORef (Connection.asyncPending connection) True
         pure True,
       Pqi.sendFlushRequest = Connection.sendMessage connection flushMessage $> True,
       Pqi.getCancel = do
-        key <- readIORef connection.backendKey
+        key <- readIORef (Connection.backendKey connection)
         pure
           $ fmap
             ( \(pid, secret) ->
                 mkCancel
                   NativeCancel
-                    { host = connection.info.host,
-                      port = connection.info.port,
+                    { host = Connection.host (Connection.info connection),
+                      port = Connection.port (Connection.info connection),
                       pid,
                       secret,
-                      asyncPendingRef = connection.asyncPending,
-                      pipelineStatusRef = connection.pipelineStatus,
-                      pendingCommandsRef = connection.pendingCommands
+                      asyncPendingRef = (Connection.asyncPending connection),
+                      pipelineStatusRef = (Connection.pipelineStatus connection),
+                      pendingCommandsRef = (Connection.pendingCommands connection)
                     }
             )
             key,
-      Pqi.notifies = popFirst connection.pendingNotifications,
-      Pqi.disableNoticeReporting = writeIORef connection.noticeReporting False,
-      Pqi.enableNoticeReporting = writeIORef connection.noticeReporting True,
-      Pqi.getNotice = popFirst connection.notices,
+      Pqi.notifies = popFirst (Connection.pendingNotifications connection),
+      Pqi.disableNoticeReporting = writeIORef (Connection.noticeReporting connection) False,
+      Pqi.enableNoticeReporting = writeIORef (Connection.noticeReporting connection) True,
+      Pqi.getNotice = popFirst (Connection.notices connection),
       Pqi.putCopyData = \payload -> Connection.sendMessage connection (copyDataMessage payload) $> Pqi.CopyInOk,
       Pqi.putCopyEnd = \reason -> do
         Connection.sendMessage connection (maybe copyDoneMessage copyFailMessage reason)
-        writeIORef connection.asyncPending True
+        writeIORef (Connection.asyncPending connection) True
         pure Pqi.CopyInOk,
       Pqi.getCopyData = getCopyData connection,
       Pqi.loCreat = LargeObject.loCreat connection,
@@ -162,13 +162,13 @@ mkConnection connection =
       Pqi.loClose = LargeObject.loClose connection,
       Pqi.loUnlink = LargeObject.loUnlink connection,
       Pqi.clientEncoding =
-        fromMaybe "SQL_ASCII" . Map.lookup "client_encoding" <$> readIORef connection.parameters,
+        fromMaybe "SQL_ASCII" . Map.lookup "client_encoding" <$> readIORef (Connection.parameters connection),
       Pqi.setClientEncoding = \encoding -> do
         result <- Query.exec connection ("SET client_encoding TO '" <> encoding <> "'")
-        pure (maybe False (\value -> value.status /= Pqi.FatalError) result),
+        pure (maybe False (\value -> status value /= Pqi.FatalError) result),
       Pqi.setErrorVerbosity = \verbosity -> do
-        previous <- readIORef connection.errorVerbosity
-        writeIORef connection.errorVerbosity verbosity
+        previous <- readIORef (Connection.errorVerbosity connection)
+        writeIORef (Connection.errorVerbosity connection) verbosity
         pure previous
     }
 
@@ -182,11 +182,11 @@ getCopyData connection nonBlocking = do
   case message of
     CopyData payload -> pure (Pqi.CopyOutRow payload)
     CopyDone -> do
-      writeIORef connection.asyncPending True
+      writeIORef (Connection.asyncPending connection) True
       pure Pqi.CopyOutDone
     CommandComplete _ -> drainToReady connection $> Pqi.CopyOutDone
     ErrorResponse _ -> drainToReady connection $> Pqi.CopyOutError
-    ReadyForQuery txState -> writeIORef connection.txStatus txState $> Pqi.CopyOutDone
+    ReadyForQuery txState -> writeIORef (Connection.txStatus connection) txState $> Pqi.CopyOutDone
     _ -> getCopyData connection nonBlocking
 
 -- | Read messages until @ReadyForQuery@, recording the transaction status.
@@ -194,7 +194,7 @@ drainToReady :: Connection -> IO ()
 drainToReady connection = do
   message <- Connection.nextMessage connection
   case message of
-    ReadyForQuery txState -> writeIORef connection.txStatus txState
+    ReadyForQuery txState -> writeIORef (Connection.txStatus connection) txState
     _ -> drainToReady connection
 
 -- | Pop the oldest element of a list stored newest-first.

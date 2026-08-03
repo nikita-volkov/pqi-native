@@ -18,7 +18,7 @@ jobs:
     uses: nikita-volkov/haskell-hackage-lib-github-actions-workflows/.github/workflows/build.yaml@v4
     secrets: inherit
     with:
-      ghc: "9.2"
+      ghc: "8.10"
       skip-doctest: true
       skip-benchmarks: true
       test-options: --qc-max-success=100

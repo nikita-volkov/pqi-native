@@ -92,7 +92,7 @@ callBinary :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -
 callBinary connection sql params = (>>= firstValue) <$> Query.execParams connection sql params Binary
 
 firstValue :: NativeResult -> Maybe ByteString
-firstValue result = case result.rows of
+firstValue result = case rows result of
   (cell : _) : _ -> cell
   _ -> Nothing
 

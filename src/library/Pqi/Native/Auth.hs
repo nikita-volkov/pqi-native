@@ -58,8 +58,8 @@ scram _user password mechanisms step
   | otherwise = do
       clientNonce <- Base64.encode <$> getRandomBytes 18
       let clientFirstBare = "n=,r=" <> clientNonce
-      step.sendInitial mechanismName ("n,," <> clientFirstBare)
-      step.receive >>= \case
+      (sendInitial step) mechanismName ("n,," <> clientFirstBare)
+      (receive step) >>= \case
         SaslError problem -> pure (Left problem)
         SaslContinue serverFirst ->
           case parseServerFirst serverFirst of
@@ -74,8 +74,8 @@ scram _user password mechanisms step
                   clientSignature = hmacSha256 storedKey authMessage
                   clientProof = xorBytes clientKey clientSignature
                   clientFinal = clientFinalWithoutProof <> ",p=" <> Base64.encode clientProof
-              step.sendResponse clientFinal
-              step.receive >>= \case
+              (sendResponse step) clientFinal
+              (receive step) >>= \case
                 SaslFinal _ -> pure (Right ())
                 SaslOk -> pure (Right ())
                 SaslError problem -> pure (Left problem)

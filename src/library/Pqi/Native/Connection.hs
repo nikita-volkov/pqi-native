@@ -186,7 +186,7 @@ data Connection = Connection
 -- | Send a serialized frontend message.
 sendMessage :: Connection -> Poker.Write -> IO ()
 sendMessage connection write = do
-  transport <- readIORef connection.transport
+  transport <- readIORef (transport connection)
   Transport.send transport write
 
 -- | Receive the next /protocol-relevant/ backend message, transparently
@@ -195,23 +195,23 @@ sendMessage connection write = do
 -- (collected when notice reporting is on), and @NotificationResponse@ (queued).
 nextMessage :: Connection -> IO BackendMessage
 nextMessage connection = do
-  transport <- readIORef connection.transport
+  transport <- readIORef (transport connection)
   (typeByte, body) <- Transport.receiveFrame transport
   case decodeBackendMessage typeByte body of
     Left err -> ioError (userError ("pqi-native: protocol decode error: " <> show err))
     Right message -> case message of
       ParameterStatus key value -> do
-        modifyIORef' connection.parameters (Map.insert key value)
+        modifyIORef' (parameters connection) (Map.insert key value)
         nextMessage connection
       NoticeResponse fields -> do
-        reporting <- readIORef connection.noticeReporting
+        reporting <- readIORef (noticeReporting connection)
         when reporting $ do
           let noticeText = formatErrorFields (Map.fromList fields)
           unless (ByteString.null noticeText)
-            $ modifyIORef' connection.notices (noticeText :)
+            $ modifyIORef' (notices connection) (noticeText :)
         nextMessage connection
       NotificationResponse pid channel payload -> do
-        modifyIORef' connection.pendingNotifications (Notify channel pid payload :)
+        modifyIORef' (pendingNotifications connection) (Notify channel pid payload :)
         nextMessage connection
       other -> pure other
 
@@ -222,8 +222,8 @@ fieldValue code = lookup code
 -- | Record a flat error message and mark the connection bad.
 setError :: Connection -> ByteString -> IO ()
 setError connection message = do
-  writeIORef connection.lastError (Just message)
-  writeIORef connection.connStatus ConnectionBad
+  writeIORef (lastError connection) (Just message)
+  writeIORef (connStatus connection) ConnectionBad
 
 -- | Open a connection: resolve and connect the socket, send the startup
 -- message, and run the authentication\/startup handshake. Like libpq, a failed
@@ -232,7 +232,7 @@ setError connection message = do
 establish :: ByteString -> IO Connection
 establish conninfo = do
   info <- parseConnInfo conninfo
-  transportResult <- try @IOException (Transport.connect info.host info.port)
+  transportResult <- try @IOException (Transport.connect (host info) (port info))
   case transportResult of
     Left err -> do
       transport <- Transport.unconnected
@@ -241,7 +241,7 @@ establish conninfo = do
       pure connection
     Right transport -> do
       connection <- newConnection False transport info
-      sendMessage connection (startupMessage [("user", info.user), ("database", info.database)])
+      sendMessage connection (startupMessage [("user", user info), ("database", database info)])
       handshake connection
       pure connection
 
@@ -252,23 +252,23 @@ nullConnection = do
   transport <- Transport.unconnected
   info <- parseConnInfo ""
   conn <- newConnection True transport info
-  writeIORef conn.lastError (Just "connection pointer is NULL\n")
+  writeIORef (lastError conn) (Just "connection pointer is NULL\n")
   pure conn
 
 -- | Close the current socket and run the startup handshake again on a fresh
 -- one, reusing the stored conninfo (the analogue of @PQreset@).
 reconnect :: Connection -> IO ()
 reconnect connection = do
-  oldTransport <- readIORef connection.transport
+  oldTransport <- readIORef (transport connection)
   Transport.close oldTransport
-  newTransport <- Transport.connect connection.info.host connection.info.port
-  writeIORef connection.transport newTransport
-  writeIORef connection.parameters Map.empty
-  writeIORef connection.backendKey Nothing
-  writeIORef connection.txStatus 0x49
-  writeIORef connection.connStatus ConnectionBad
-  writeIORef connection.lastError (Just "")
-  sendMessage connection (startupMessage [("user", connection.info.user), ("database", connection.info.database)])
+  newTransport <- Transport.connect (host (info connection)) (port (info connection))
+  writeIORef (transport connection) newTransport
+  writeIORef (parameters connection) Map.empty
+  writeIORef (backendKey connection) Nothing
+  writeIORef (txStatus connection) 0x49
+  writeIORef (connStatus connection) ConnectionBad
+  writeIORef (lastError connection) (Just "")
+  sendMessage connection (startupMessage [("user", user (info connection)), ("database", database (info connection))])
   handshake connection
 
 newConnection :: Bool -> Transport -> ConnInfo -> IO Connection
@@ -305,14 +305,14 @@ handshake connection = authenticating
       case message of
         AuthenticationOk -> startingUp
         AuthenticationCleartextPassword -> do
-          sendMessage connection (passwordMessage connection.info.password)
+          sendMessage connection (passwordMessage (password (info connection)))
           authenticating
         AuthenticationMD5Password salt -> do
-          let response = Auth.md5Password connection.info.user connection.info.password salt
+          let response = Auth.md5Password (user (info connection)) (password (info connection)) salt
           sendMessage connection (passwordMessage response)
           authenticating
         AuthenticationSASL mechanisms ->
-          Auth.scram connection.info.user connection.info.password mechanisms (saslExchange connection) >>= \case
+          Auth.scram (user (info connection)) (password (info connection)) mechanisms (saslExchange connection) >>= \case
             Left problem -> setError connection problem
             Right () -> startingUp
         ErrorResponse fields -> failWith fields
@@ -321,26 +321,26 @@ handshake connection = authenticating
       message <- nextMessage connection
       case message of
         BackendKeyData pid secret -> do
-          writeIORef connection.backendKey (Just (pid, secret))
+          writeIORef (backendKey connection) (Just (pid, secret))
           startingUp
         ReadyForQuery txState -> do
-          writeIORef connection.txStatus txState
-          writeIORef connection.connStatus ConnectionOk
+          writeIORef (txStatus connection) txState
+          writeIORef (connStatus connection) ConnectionOk
         ErrorResponse fields -> failWith fields
         _ -> startingUp
     failWith fields = do
       let fmtFields = formatErrorFields (Map.fromList fields)
-      transport <- readIORef connection.transport
+      transport <- readIORef (transport connection)
       mIp <- catch (Just <$> Transport.peerIp transport) (\(_ :: SomeException) -> pure Nothing)
       setError connection $ case mIp of
         Nothing -> fmtFields
         Just ip ->
           "connection to server at \""
-            <> connection.info.host
+            <> host (info connection)
             <> "\" ("
             <> ip
             <> "), port "
-            <> ByteString.Char8.pack (show connection.info.port)
+            <> ByteString.Char8.pack (show (port (info connection)))
             <> " failed: "
             <> fmtFields
 

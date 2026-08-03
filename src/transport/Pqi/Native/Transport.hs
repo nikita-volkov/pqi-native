@@ -53,30 +53,30 @@ unconnected = do
 
 -- | Close the connection.
 close :: Transport -> IO ()
-close transport = Socket.close transport.socket
+close transport = Socket.close (socket transport)
 
 -- | The underlying socket file descriptor.
 socketFd :: Transport -> IO Int32
-socketFd transport = fromIntegral <$> Socket.unsafeFdSocket transport.socket
+socketFd transport = fromIntegral <$> Socket.unsafeFdSocket (socket transport)
 
 -- | Send a serialized message.
 send :: Transport -> Poker.Write -> IO ()
-send transport write = Socket.ByteString.sendAll transport.socket (Poker.toByteString write)
+send transport write = Socket.ByteString.sendAll (socket transport) (Poker.toByteString write)
 
 -- | Read exactly @n@ bytes, looping over @recv@ (which yields up to @n@) and
 -- buffering any overshoot. Throws on EOF before @n@ bytes arrive.
 receiveExactly :: Transport -> Int -> IO ByteString
 receiveExactly transport n = do
-  buffered <- readIORef transport.readBuffer
+  buffered <- readIORef (readBuffer transport)
   go buffered
   where
     go accumulated
       | ByteString.length accumulated >= n = do
           let (result, rest) = ByteString.splitAt n accumulated
-          writeIORef transport.readBuffer rest
+          writeIORef (readBuffer transport) rest
           pure result
       | otherwise = do
-          chunk <- Socket.ByteString.recv transport.socket (max 4096 (n - ByteString.length accumulated))
+          chunk <- Socket.ByteString.recv (socket transport) (max 4096 (n - ByteString.length accumulated))
           if ByteString.null chunk
             then ioError (mkIOError eofErrorType "pqi-native: connection closed by server" Nothing Nothing)
             else go (accumulated <> chunk)
@@ -102,7 +102,7 @@ readUntilClosed :: Transport -> IO ()
 readUntilClosed transport = go
   where
     go = do
-      chunk <- Socket.ByteString.recv transport.socket 4096
+      chunk <- Socket.ByteString.recv (socket transport) 4096
       if ByteString.null chunk
         then pure ()
         else go
@@ -111,7 +111,7 @@ readUntilClosed transport = go
 -- @\"127.0.0.1\"@). Throws if the socket has no peer (unconnected).
 peerIp :: Transport -> IO ByteString
 peerIp transport = do
-  addr <- Socket.getPeerName transport.socket
+  addr <- Socket.getPeerName (socket transport)
   (Just ip, _) <- Socket.getNameInfo [Socket.NI_NUMERICHOST] True False addr
   pure (ByteString.Char8.pack ip)
 

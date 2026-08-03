@@ -30,7 +30,6 @@ source-repository head
 common base
   default-language: Haskell2010
   default-extensions:
-    ApplicativeDo
     BangPatterns
     BinaryLiterals
     BlockArguments
@@ -43,7 +42,6 @@ common base
     DeriveTraversable
     DerivingStrategies
     DerivingVia
-    DuplicateRecordFields
     EmptyDataDecls
     ExistentialQuantification
     FlexibleContexts
@@ -57,11 +55,9 @@ common base
     MultiParamTypeClasses
     MultiWayIf
     NamedFieldPuns
-    NoFieldSelectors
     NoImplicitPrelude
     NoMonomorphismRestriction
     NumericUnderscores
-    OverloadedRecordDot
     OverloadedStrings
     ParallelListComp
     PatternGuards
@@ -71,7 +67,6 @@ common base
     ScopedTypeVariables
     StandaloneDeriving
     StrictData
-    TemplateHaskell
     TupleSections
     TypeApplications
     TypeFamilies

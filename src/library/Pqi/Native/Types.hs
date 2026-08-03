@@ -145,35 +145,35 @@ readPositiveInt bs = case ByteString.Char8.readInt bs of
 mkResult :: NativeResult -> Result
 mkResult result =
   Result
-    { resultStatus = pure result.status,
-      resultErrorMessage = pure (Just (formatResultError result.queryText result.errorFields)),
-      resultErrorField = \field -> pure (Map.lookup (fieldCodeByte field) result.errorFields),
+    { resultStatus = pure (status result),
+      resultErrorMessage = pure (Just (formatResultError (queryText result) (errorFields result))),
+      resultErrorField = \field -> pure (Map.lookup (fieldCodeByte field) (errorFields result)),
       unsafeFreeResult = pure (),
-      ntuples = pure (fromIntegral (length result.rows)),
-      nfields = pure (fromIntegral (length result.fields)),
+      ntuples = pure (fromIntegral (length (rows result))),
+      nfields = pure (fromIntegral (length (fields result))),
       fname = \column -> pure $ do
-        fd <- atMay result.fields column
-        if ByteString.null fd.name then Nothing else Just fd.name,
-      fnumber = \name ->
-        pure (fromIntegral <$> findIndex (\field -> field.name == foldIdentifier name) result.fields),
-      ftable = \column -> pure (maybe 0 (.tableOid) (atMay result.fields column)),
+        fd <- atMay (fields result) column
+        if ByteString.null (name fd) then Nothing else Just (name fd),
+      fnumber = \colName ->
+        pure (fromIntegral <$> findIndex (\field -> name field == foldIdentifier colName) (fields result)),
+      ftable = \column -> pure (maybe 0 tableOid (atMay (fields result) column)),
       ftablecol = \column ->
-        pure (maybe 0 (\field -> fromIntegral (field.columnAttributeNumber :: Int16)) (atMay result.fields column)),
+        pure (maybe 0 (\field -> fromIntegral (columnAttributeNumber field :: Int16)) (atMay (fields result) column)),
       fformat = \column ->
-        pure (maybe Text (\field -> formatOf field.formatCode) (atMay result.fields column)),
-      ftype = \column -> pure (maybe 0 (.typeOid) (atMay result.fields column)),
+        pure (maybe Text (\field -> formatOf (formatCode field)) (atMay (fields result) column)),
+      ftype = \column -> pure (maybe 0 typeOid (atMay (fields result) column)),
       fmod = \column ->
-        pure (maybe 0 (\field -> fromIntegral (field.typeModifier :: Int32)) (atMay result.fields column)),
+        pure (maybe 0 (\field -> fromIntegral (typeModifier field :: Int32)) (atMay (fields result) column)),
       fsize = \column ->
-        pure (maybe 0 (\field -> fromIntegral (field.typeSize :: Int16)) (atMay result.fields column)),
+        pure (maybe 0 (\field -> fromIntegral (typeSize field :: Int16)) (atMay (fields result) column)),
       getvalue = \row column -> pure (join (cellAt result row column)),
       getvalue' = \row column -> pure (join (cellAt result row column)),
       getisnull = \row column -> pure (maybe True isNothing (cellAt result row column)),
       getlength = \row column -> pure (maybe 0 (maybe 0 ByteString.length) (cellAt result row column)),
-      nparams = pure (fromIntegral (length result.paramOids)),
-      paramtype = \index -> pure (fromMaybe 0 (atMay result.paramOids index)),
-      cmdStatus = pure (Just (fromMaybe "" result.commandTag)),
-      cmdTuples = pure (Just (maybe "" affectedRows result.commandTag))
+      nparams = pure (fromIntegral (length (paramOids result))),
+      paramtype = \index -> pure (fromMaybe 0 (atMay (paramOids result) index)),
+      cmdStatus = pure (Just (fromMaybe "" (commandTag result))),
+      cmdTuples = pure (Just (maybe "" affectedRows (commandTag result)))
     }
 
 -- | Build a 'Cancel' whose field closes over the given 'NativeCancel'.
@@ -181,12 +181,12 @@ mkCancel :: NativeCancel -> Cancel
 mkCancel nc =
   Cancel
     { cancel = do
-        pending <- readIORef nc.asyncPendingRef
+        pending <- readIORef (asyncPendingRef nc)
         if not pending
           then pure (Right ())
           else do
-            transport <- Transport.connect nc.host nc.port
-            Transport.send transport (cancelRequest nc.pid nc.secret)
+            transport <- Transport.connect (host nc) (port nc)
+            Transport.send transport (cancelRequest (pid nc) (secret nc))
             -- Read until EOF to ensure the server has processed the cancel request
             -- before we close the connection. This matches libpq's PQcancel behavior
             -- and prevents the cancel signal from racing with the next query.
@@ -206,7 +206,7 @@ atMay xs i
 
 cellAt :: NativeResult -> Int32 -> Int32 -> Maybe (Maybe ByteString)
 cellAt result row column = do
-  rowValues <- atMay result.rows row
+  rowValues <- atMay (rows result) row
   atMay rowValues column
 
 formatOf :: Int16 -> Format
