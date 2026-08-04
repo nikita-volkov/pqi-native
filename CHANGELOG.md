@@ -1,3 +1,9 @@
+# v0.2.0.0
+
+## Breaking
+
+- Hid the public sublibs.
+
 # v0.1.0.1
 
 ## Fixes
