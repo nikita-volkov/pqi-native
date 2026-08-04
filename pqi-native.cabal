@@ -82,7 +82,6 @@ common test
 
 library comms
   import: base
-  visibility: public
   hs-source-dirs: src/comms
   exposed-modules:
     Pqi.Native.Comms
@@ -96,7 +95,6 @@ library comms
 
 library transport
   import: base
-  visibility: public
   hs-source-dirs: src/transport
   exposed-modules:
     Pqi.Native.Transport
