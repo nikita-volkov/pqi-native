@@ -3,9 +3,15 @@
 [![Hackage](https://img.shields.io/hackage/v/pqi-native.svg)](https://hackage.haskell.org/package/pqi-native)
 [![Continuous Haddock](https://img.shields.io/badge/haddock-master-blue)](https://nikita-volkov.github.io/pqi-native/)
 
-> **Status: Alpha.** This is a young, LLM-generated reimplementation of `libpq`'s
-> wire protocol handling. It is verified against a conformance suite (see
-> below), but it hasn't seen much production use yet. See
+> **Status: Alpha.** `pqi-native` is an early implementation of a pure-Haskell
+> transport for [`pqi`](https://github.com/nikita-volkov/pqi). It exists
+> alongside [`pqi-ffi`](https://github.com/nikita-volkov/pqi-ffi), the
+> established C-backed adapter, and the two are fully interchangeable: any
+> code written against `pqi` runs unchanged on either one, so trying
+> `pqi-native` carries no lock-in and no rewrite cost. Correctness is checked
+> continuously against a conformance suite (see below), but the adapter
+> hasn't yet accumulated production mileage. If you need a production-proven
+> transport today, use `pqi-ffi`. See
 > [_Making libpq a choice_](https://nikita-volkov.github.io/pqi-making-libpq-a-choice/)
 > for why this project exists and what tradeoffs that implies.
 
@@ -13,7 +19,9 @@ A pure-Haskell [`pqi`](https://github.com/nikita-volkov/pqi) adapter
 that speaks the PostgreSQL frontend/backend wire protocol directly — no
 dependency on the C `libpq` library.
 
-`pqi-native` is an LLM-generated port of the PostgreSQL C client library, [`libpq`](https://www.postgresql.org/docs/current/libpq.html). The upstream [`libpq` source](https://github.com/postgres/postgres/tree/master/src/interfaces/libpq) is the direct reference for the implementation.
+`pqi-native` reimplements the wire protocol handled by the PostgreSQL C
+client library, [`libpq`](https://www.postgresql.org/docs/current/libpq.html),
+from scratch in Haskell. The upstream [`libpq` source](https://github.com/postgres/postgres/tree/master/src/interfaces/libpq) is the direct reference for the implementation.
 
 ## Fidelity goal
 
@@ -30,7 +38,15 @@ reference connection against the same database and asserts exact equality.
 **Alpha.** The full `Pqi.Connection` capability record is implemented and
 verified against the `postgresql-libpq` reference via the conformance
 differential suite, but the library hasn't yet accumulated real-world
-production mileage. Read
+production mileage.
+
+Because it implements the same `pqi` interface as
+[`pqi-ffi`](https://github.com/nikita-volkov/pqi-ffi), switching between the
+two is a one-line change — pass a different `Adapter` value, nothing else in
+your code moves. That makes `pqi-native` low-risk to evaluate now and easy to
+fall back from: adopt it where you want to shed the `libpq` dependency, and
+drop back to `pqi-ffi` at any time without touching the rest of your
+codebase. Read
 [_Making libpq a choice_](https://nikita-volkov.github.io/pqi-making-libpq-a-choice/)
 for the motivation and the tradeoffs of adopting it at this stage.
 
