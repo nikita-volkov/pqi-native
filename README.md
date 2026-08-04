@@ -3,6 +3,12 @@
 [![Hackage](https://img.shields.io/hackage/v/pqi-native.svg)](https://hackage.haskell.org/package/pqi-native)
 [![Continuous Haddock](https://img.shields.io/badge/haddock-master-blue)](https://nikita-volkov.github.io/pqi-native/)
 
+> **Status: Alpha.** This is a young, LLM-generated reimplementation of `libpq`'s
+> wire protocol handling. It is verified against a conformance suite (see
+> below), but it hasn't seen much production use yet. See
+> [_Making libpq a choice_](https://nikita-volkov.github.io/pqi-making-libpq-a-choice/)
+> for why this project exists and what tradeoffs that implies.
+
 A pure-Haskell [`pqi`](https://github.com/nikita-volkov/pqi) adapter
 that speaks the PostgreSQL frontend/backend wire protocol directly — no
 dependency on the C `libpq` library.
@@ -21,8 +27,12 @@ reference connection against the same database and asserts exact equality.
 
 ## Status
 
-The full `Pqi.Connection` capability record is implemented. Verified against
-the `postgresql-libpq` reference via the conformance differential suite.
+**Alpha.** The full `Pqi.Connection` capability record is implemented and
+verified against the `postgresql-libpq` reference via the conformance
+differential suite, but the library hasn't yet accumulated real-world
+production mileage. Read
+[_Making libpq a choice_](https://nikita-volkov.github.io/pqi-making-libpq-a-choice/)
+for the motivation and the tradeoffs of adopting it at this stage.
 
 Authentication: **trust**, **MD5**, and **SCRAM-SHA-256** are implemented. SCRAM
 is verified against a password-auth PostgreSQL 17 container (which defaults to
