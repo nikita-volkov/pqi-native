@@ -1,4 +1,6 @@
-# Upcoming
+# v0.2.0.1
+
+Documentation corrections.
 
 # v0.2.0.0
 
