@@ -1,6 +1,6 @@
 # Upcoming
 
-# v0.2.0.0-rc
+# v0.2.0.0
 
 ## Breaking
 
