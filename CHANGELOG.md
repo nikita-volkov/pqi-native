@@ -1,3 +1,9 @@
+# v0.2.0.5
+
+## Fixes
+
+- Fixed the release process to actually result in publishing of the package.
+
 # v0.2.0.4
 
 ## Fixes
