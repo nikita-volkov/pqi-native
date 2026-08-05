@@ -11,6 +11,13 @@ description:
   @ptr-peeker@; the public library is an abstraction over it that builds the
   @pqi@ @Adapter@.
 
+  __Status: Alpha.__ Verified byte-for-byte against @postgresql-libpq@ via a
+  differential conformance suite, but not yet proven in production. It
+  implements the same @pqi@ interface as
+  [@pqi-ffi@](https://hackage.haskell.org/package/pqi-ffi), the stable
+  C-backed adapter, so the two are fully interchangeable — swapping
+  between them is a one-line @Adapter@ change.
+
 homepage: https://github.com/nikita-volkov/pqi-native
 bug-reports: https://github.com/nikita-volkov/pqi-native/issues
 author: Nikita Volkov <nikita.y.volkov@mail.ru>
