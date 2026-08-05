@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: pqi-native
-version: 0.2.0.4
+version: 0.2.0.5
 category: Database, PostgreSQL
 synopsis: Native (pure-Haskell) adapter for pqi
 description:
