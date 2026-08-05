@@ -1,4 +1,8 @@
-# Upcoming
+# v0.2.0.2
+
+## Fixes
+
+- Connection startup now forwards extra conninfo params (e.g. `application_name`, `options`) instead of silently dropping everything but `user` and `database`, so they reach the server the way libpq's do. Caught by the new differential coverage in `pqi-conformance` 0.1.1.0.
 
 # v0.2.0.1
 

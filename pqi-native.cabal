@@ -146,5 +146,5 @@ test-suite native-test
   build-depends:
     base >=4.11 && <5,
     hspec >=2.11 && <2.12,
-    pqi-conformance ^>=0.1,
+    pqi-conformance ^>=0.1.1,
     pqi-native,

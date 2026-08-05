@@ -19,6 +19,7 @@ import Control.Exception (IOException, SomeException, catch, try)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Pqi (ConnStatus (..), Notify (..), PipelineStatus (..), Verbosity (..))
 import qualified Pqi.Native.Auth as Auth
 import Pqi.Native.Prelude
@@ -36,7 +37,11 @@ data ConnInfo = ConnInfo
     port :: Int,
     user :: ByteString,
     database :: ByteString,
-    password :: ByteString
+    password :: ByteString,
+    -- | Every other recognized @key=value@ pair (e.g. @application_name@,
+    -- @options@), forwarded verbatim in the startup message so the server
+    -- sees them, the way libpq does.
+    extraParams :: Map.Map ByteString ByteString
   }
   deriving stock (Eq, Show)
 
@@ -71,7 +76,8 @@ parseKeyValue dfltUser raw =
       port = maybe 5432 fst (ByteString.Char8.readInt (get "port" "5432")),
       user = theUser,
       database = get "dbname" theUser,
-      password = get "password" ""
+      password = get "password" "",
+      extraParams = Map.withoutKeys settings reservedKeys
     }
   where
     pairs = mapMaybe toPair (ByteString.Char8.words raw)
@@ -83,12 +89,17 @@ parseKeyValue dfltUser raw =
         | not (ByteString.null value) -> Just (key, ByteString.drop 1 value)
       _ -> Nothing
 
+-- | Conninfo keys already surfaced via their own 'ConnInfo' fields, so they're
+-- excluded from 'extraParams' rather than duplicated there.
+reservedKeys :: Set.Set ByteString
+reservedKeys = Set.fromList ["host", "port", "user", "dbname", "password"]
+
 -- | Parse the authority+path portion of a @postgresql://@ URI (scheme already
 -- stripped). Handles @[user[:password]@][host[:port]][/dbname]@; ignores query
 -- parameters other than what appears in those components.
 parseUri :: ByteString -> ByteString -> ConnInfo
 parseUri dfltUser withoutScheme =
-  ConnInfo {host, port, user, database, password}
+  ConnInfo {host, port, user, database, password, extraParams}
   where
     -- Split off optional "userinfo@" prefix. The '@' is unambiguous in this
     -- position: hosts do not contain '@' in practice.
@@ -114,6 +125,21 @@ parseUri dfltUser withoutScheme =
       if ByteString.null rawDbname
         then user
         else pctDecode rawDbname
+
+    -- Everything after the first '?', parsed as '&'-separated key=value pairs
+    -- (e.g. ?application_name=foo&sslmode=disable).
+    rawQuery = ByteString.drop 1 (ByteString.dropWhile (/= 0x3f) pathAndQuery)
+
+    extraParams =
+      Map.withoutKeys
+        (Map.fromList (mapMaybe toQueryPair (ByteString.split 0x26 rawQuery)))
+        reservedKeys
+
+    toQueryPair token = case ByteString.elemIndex 0x3d token of
+      Just i ->
+        let (k, v) = ByteString.splitAt i token
+         in if ByteString.null k then Nothing else Just (pctDecode k, pctDecode (ByteString.drop 1 v))
+      Nothing -> Nothing
 
     -- Parse host and port from "host:port", handling IPv6 "[::1]:port".
     (host, port)
@@ -241,7 +267,7 @@ establish conninfo = do
       pure connection
     Right transport -> do
       connection <- newConnection False transport info
-      sendMessage connection (startupMessage [("user", user info), ("database", database info)])
+      sendMessage connection (startupMessage (startupParams info))
       handshake connection
       pure connection
 
@@ -268,8 +294,14 @@ reconnect connection = do
   writeIORef (txStatus connection) 0x49
   writeIORef (connStatus connection) ConnectionBad
   writeIORef (lastError connection) (Just "")
-  sendMessage connection (startupMessage [("user", user (info connection)), ("database", database (info connection))])
+  sendMessage connection (startupMessage (startupParams (info connection)))
   handshake connection
+
+-- | The startup message parameter list: @user@ and @database@, plus any
+-- extra conninfo params (e.g. @application_name@) forwarded verbatim.
+startupParams :: ConnInfo -> [(ByteString, ByteString)]
+startupParams info =
+  ("user", user info) : ("database", database info) : Map.toList (extraParams info)
 
 newConnection :: Bool -> Transport -> ConnInfo -> IO Connection
 newConnection isNull transport info = do
