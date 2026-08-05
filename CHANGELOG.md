@@ -1,3 +1,9 @@
+# v0.2.0.4
+
+## Fixes
+
+- Fixed the connection closing.
+
 # v0.2.0.3
 
 Documentation corrections.

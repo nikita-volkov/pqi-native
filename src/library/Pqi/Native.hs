@@ -49,7 +49,19 @@ mkConnection connection =
   Pqi.Connection
     { Pqi.connectPoll = pure Pqi.PollingOk,
       Pqi.isNullConnection = (Connection.isNull connection),
-      Pqi.finish = readIORef (Connection.transport connection) >>= Transport.close,
+      Pqi.finish = do
+        transport <- readIORef (Connection.transport connection)
+        Transport.close transport
+        -- Mark the connection unusable so that any further protocol
+        -- operation is rejected by the 'ConnectionOk' guards (e.g.
+        -- 'Pqi.Native.Query.sendAsync', 'withReady') instead of attempting
+        -- I/O on the now-closed socket. Without this, a caller that keeps
+        -- using a 'Pqi.Connection' after 'finish' (a supported pattern via
+        -- 'Hasql.Session.onLibpqConnection', used e.g. by hasql-pool to test
+        -- eviction of a broken connection) can have a later send attempt
+        -- block forever instead of failing, if the closed file descriptor
+        -- has since been reused elsewhere in the process.
+        writeIORef (Connection.connStatus connection) Pqi.ConnectionBad,
       Pqi.reset = Connection.reconnect connection,
       Pqi.resetStart = Connection.reconnect connection $> True,
       Pqi.resetPoll = pure Pqi.PollingOk,
