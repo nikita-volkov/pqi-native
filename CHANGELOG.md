@@ -1,3 +1,9 @@
+# v1.0.0.0
+
+## Non-breaking
+
+- Support for the `resStatus` field of `Pqi.Adapter`
+
 # v0.2.0.5
 
 ## Fixes

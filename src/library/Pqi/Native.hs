@@ -39,8 +39,25 @@ adapter =
       Pqi.connectdb = \conninfo -> mkConnection <$> Connection.establish conninfo,
       Pqi.connectStart = \conninfo -> mkConnection <$> Connection.establish conninfo,
       Pqi.newNullConnection = mkConnection <$> Connection.nullConnection,
-      Pqi.unescapeBytea = \input -> pure (Just (UnescapeBytea.unescapeBytea input))
+      Pqi.unescapeBytea = \input -> pure (Just (UnescapeBytea.unescapeBytea input)),
+      Pqi.resStatus = pure . resStatus
     }
+
+-- | The string libpq's @PQresStatus@ describes each status code with.
+resStatus :: Pqi.ExecStatus -> ByteString
+resStatus = \case
+  Pqi.EmptyQuery -> "PGRES_EMPTY_QUERY"
+  Pqi.CommandOk -> "PGRES_COMMAND_OK"
+  Pqi.TuplesOk -> "PGRES_TUPLES_OK"
+  Pqi.CopyOut -> "PGRES_COPY_OUT"
+  Pqi.CopyIn -> "PGRES_COPY_IN"
+  Pqi.CopyBoth -> "PGRES_COPY_BOTH"
+  Pqi.BadResponse -> "PGRES_BAD_RESPONSE"
+  Pqi.NonfatalError -> "PGRES_NONFATAL_ERROR"
+  Pqi.FatalError -> "PGRES_FATAL_ERROR"
+  Pqi.SingleTuple -> "PGRES_SINGLE_TUPLE"
+  Pqi.PipelineSync -> "PGRES_PIPELINE_SYNC"
+  Pqi.PipelineAbort -> "PGRES_PIPELINE_ABORTED"
 
 -- | Build a 'Pqi.Connection' whose fields close over the given native
 -- connection.
