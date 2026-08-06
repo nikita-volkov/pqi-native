@@ -16,7 +16,7 @@
 > for why this project exists and what tradeoffs that implies.
 
 A pure-Haskell [`pqi`](https://github.com/nikita-volkov/pqi) adapter
-that speaks the PostgreSQL frontend/backend wire protocol directly — no
+that speaks the PostgreSQL frontend/backend wire protocol directly - no
 dependency on the C `libpq` library.
 
 `pqi-native` reimplements the wire protocol handled by the PostgreSQL C
@@ -26,7 +26,7 @@ from scratch in Haskell. The upstream [`libpq` source](https://github.com/postgr
 ## Fidelity goal
 
 The goal is **identical output to `libpq`** for every protocol-derived
-value — error message strings, notice text, result status, field metadata,
+value - error message strings, notice text, result status, field metadata,
 cell data, and all structured error fields. Fidelity is continuously enforced
 by [`pqi-conformance`](https://github.com/nikita-volkov/pqi-conformance), which
 runs every operation on both this adapter and a direct
@@ -42,7 +42,7 @@ production mileage.
 
 Because it implements the same `pqi` interface as
 [`pqi-ffi`](https://github.com/nikita-volkov/pqi-ffi), switching between the
-two is a one-line change — pass a different `Adapter` value, nothing else in
+two is a one-line change - pass a different `Adapter` value, nothing else in
 your code moves. That makes `pqi-native` low-risk to evaluate now and easy to
 fall back from: adopt it where you want to shed the `libpq` dependency, and
 drop back to `pqi-ffi` at any time without touching the rest of your

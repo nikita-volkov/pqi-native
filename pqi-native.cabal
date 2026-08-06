@@ -15,7 +15,7 @@ description:
   differential conformance suite, but not yet proven in production. It
   implements the same @pqi@ interface as
   [@pqi-ffi@](https://hackage.haskell.org/package/pqi-ffi), the stable
-  C-backed adapter, so the two are fully interchangeable — swapping
+  C-backed adapter, so the two are fully interchangeable - swapping
   between them is a one-line @Adapter@ change.
 
 homepage: https://github.com/nikita-volkov/pqi-native

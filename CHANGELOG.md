@@ -1,3 +1,7 @@
+# v1.0.0.1
+
+Doc corrections.
+
 # v1.0.0.0
 
 ## Non-breaking

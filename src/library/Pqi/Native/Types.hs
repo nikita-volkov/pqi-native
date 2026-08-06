@@ -52,7 +52,7 @@ data NativeResult = NativeResult
 -- Carries references to connection state so the cancel implementation can
 -- decide whether a network round-trip is necessary:
 --
--- * @asyncPendingRef@: False when nothing is in flight at all — skip the
+-- * @asyncPendingRef@: False when nothing is in flight at all - skip the
 --   round-trip entirely.
 -- * @pipelineStatusRef@ + @pendingCommandsRef@: in pipeline mode,
 --   @asyncPending@ stays True even after all @CommandComplete@ messages

@@ -1,5 +1,5 @@
 -- | The large-object interface, implemented over the server's @lo_*@ SQL
--- functions (rather than libpq's fast-path protocol) — identical results, far
+-- functions (rather than libpq's fast-path protocol) - identical results, far
 -- less machinery. As with libpq, the open\/read\/write\/close operations must be
 -- run inside a transaction managed by the caller.
 module Pqi.Native.LargeObject
