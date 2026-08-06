@@ -25,7 +25,7 @@ from scratch in Haskell. The upstream [`libpq` source](https://github.com/postgr
 
 ## Fidelity goal
 
-The goal is **byte-identical output to `libpq`** for every protocol-derived
+The goal is **identical output to `libpq`** for every protocol-derived
 value — error message strings, notice text, result status, field metadata,
 cell data, and all structured error fields. Fidelity is continuously enforced
 by [`pqi-conformance`](https://github.com/nikita-volkov/pqi-conformance), which
