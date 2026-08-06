@@ -139,7 +139,7 @@ library
     bytestring >=0.10 && <0.13,
     containers >=0.6 && <0.9,
     crypton >=0.34 && <2,
-    pqi ^>=1.0,
+    pqi ^>=1.1,
     pqi-native:transport,
     ptr-peeker ^>=0.2,
     ptr-poker ^>=0.1.3,

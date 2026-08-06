@@ -1,3 +1,9 @@
+# v1.0.1.0
+
+## Non-breaking
+
+- Picked up `pqi` 1.1.0.0, which renamed `Notify`'s fields to `notifyRelname`/`notifyBePid`/`notifyExtra` to match `postgresql-libpq`
+
 # v1.0.0.1
 
 Doc corrections.
