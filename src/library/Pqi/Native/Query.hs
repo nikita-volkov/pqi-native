@@ -18,6 +18,7 @@ module Pqi.Native.Query
 where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Sequence as Seq
 import Pqi (ConnStatus (..), ExecStatus (..), Format (..), PipelineStatus (..))
 import Pqi.Native.Connection
 import Pqi.Native.Prelude
@@ -112,10 +113,17 @@ sendQuery connection sql = sendAsync connection sql (queryMessage sql)
 sendQueryParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO Bool
 sendQueryParams connection sql params resultFormat = do
   pipeline <- inPipeline connection
-  sendAsync connection sql
-    $ if pipeline
-      then asyncParamsWrite sql params resultFormat
-      else paramsWrite sql params resultFormat
+  ok <-
+    sendAsync connection sql
+      $ if pipeline
+        then asyncParamsWrite sql params resultFormat
+        else paramsWrite sql params resultFormat
+  -- 'sendQueryParams' drives the extended protocol and so always sends an
+  -- unnamed @Parse@, whose @ParseComplete@ must fold into this command's own
+  -- result (like 'sendQueryPrepared'). Record its origin so it is not mistaken
+  -- for the terminal @ParseComplete@ of a pipelined 'sendPrepare'.
+  when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> False)
+  pure ok
 
 sendPrepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO Bool
 sendPrepare connection name sql parameterTypes = do
@@ -125,7 +133,7 @@ sendPrepare connection name sql parameterTypes = do
       $ if pipeline
         then parseMessage name sql (fromMaybe [] parameterTypes)
         else prepareWrite name sql parameterTypes
-  when (ok && pipeline) $ modifyIORef' (pendingParses connection) (+ 1)
+  when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> True)
   pure ok
 
 sendQueryPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO Bool
@@ -217,13 +225,21 @@ getNextResult connection = do
               pure (Just (NativeResult SingleTuple (accFields builder) [values] Nothing Map.empty [] ""))
             else go singleRow builder {accRevRows = values : (accRevRows builder)}
         ParseComplete -> do
-          parses <- readIORef (pendingParses connection)
-          if parses > 0 && pipeStatus /= PipelineOff
-            then do
-              modifyIORef' (pendingParses connection) (subtract 1)
+          -- Charge the @ParseComplete@ to the command that produced it by
+          -- popping the oldest recorded origin. Only a 'sendPrepare' origin
+          -- (@True@) terminates the command as 'CommandOk'; a 'sendQueryParams'
+          -- origin (@False@) folds into the accumulating result, and so does a
+          -- @ParseComplete@ seen outside pipeline mode (e.g. a non-pipelined
+          -- async 'sendQueryParams', whose result is collected by 'collectExtended').
+          origin <-
+            if pipeStatus /= PipelineOff
+              then popPendingParseOrigin connection
+              else pure Nothing
+          case origin of
+            Just True -> do
               finishCommand pipeStatus
               pure (Just (NativeResult CommandOk [] [] Nothing Map.empty [] ""))
-            else go singleRow builder {accHadResponse = True}
+            _ -> go singleRow builder {accHadResponse = True}
         BindComplete ->
           go singleRow builder {accHadResponse = True}
         CloseComplete ->
@@ -281,6 +297,20 @@ getNextResult connection = do
               when (remaining == 0) $ writeIORef (asyncPending connection) False
               pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
         _ -> go singleRow builder
+
+-- | Pop the origin of the next in-flight @ParseComplete@ in pipeline mode:
+-- @True@ if it is the terminal @ParseComplete@ of a 'sendPrepare' (to be
+-- materialized as 'CommandOk'), @False@ if it belongs to a 'sendQueryParams'
+-- and must fold into that command's accumulating result. @Nothing@ when no
+-- @Parse@ is pending (defensive: the @ParseComplete@ is then folded).
+popPendingParseOrigin :: Connection -> IO (Maybe Bool)
+popPendingParseOrigin connection =
+  atomicModifyIORef'
+    (pendingParseOrigins connection)
+    ( \queue -> case Seq.viewl queue of
+        origin Seq.:< rest -> (rest, Just origin)
+        Seq.EmptyL -> (queue, Nothing)
+    )
 
 -- | Describe a prepared statement.
 describePrepared :: Connection -> ByteString -> IO (Maybe NativeResult)

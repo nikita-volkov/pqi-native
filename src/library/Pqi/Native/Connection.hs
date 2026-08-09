@@ -21,6 +21,7 @@ import Control.Exception (IOException, SomeException, catch, try)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.Map.Strict as Map
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Pqi (ConnStatus (..), Notify (..), PipelineStatus (..), Verbosity (..))
 import qualified Pqi.Native.Auth as Auth
@@ -232,10 +233,18 @@ data Connection = Connection
     pipelineSeparatorPending :: IORef Bool,
     pendingSyncs :: IORef Int,
     pendingCommands :: IORef Int,
-    -- | Count of standalone @Parse@ messages sent in pipeline mode (each from
-    -- 'sendPrepare'), for which only @ParseComplete@ (no @CommandComplete@) is
-    -- expected as a terminal response.
-    pendingParses :: IORef Int,
+    -- | FIFO, one entry per in-flight pipeline command that sends a @Parse@
+    -- ('sendQueryParams' or 'sendPrepare'), recording whether that command's
+    -- @ParseComplete@ is itself the terminal result. 'sendPrepare' pushes
+    -- @True@ (its @ParseComplete@ ends the command as 'CommandOk');
+    -- 'sendQueryParams' pushes @False@ (its @ParseComplete@ must fold into the
+    -- command's accumulating result, like every other extended-protocol
+    -- message, and never terminate it early). Popping the head at the right
+    -- @ParseComplete@ keeps the origins in order even when several commands are
+    -- pipelined together - a plain counter cannot, which is what let a
+    -- pipelined 'sendPrepare' steal the 'ParseComplete' of an earlier
+    -- 'sendQueryParams' and shift every later result by one.
+    pendingParseOrigins :: IORef (Seq.Seq Bool),
     errorVerbosity :: IORef Verbosity,
     -- | The SQL text of the most recently sent query (set by sendQuery /
     -- sendQueryParams). Used when formatting error messages for async results
@@ -370,7 +379,7 @@ newConnection isNull transport info = do
     <*> newIORef False
     <*> newIORef 0
     <*> newIORef 0
-    <*> newIORef 0
+    <*> newIORef Seq.empty
     <*> newIORef ErrorsDefault
     <*> newIORef ""
 
