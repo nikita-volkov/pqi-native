@@ -1,3 +1,11 @@
+# v1.0.1.1
+
+## Fixes
+
+- Builds on Windows: socket I/O and signal handling now branch on the host OS, selecting `Win32` in place of `unix`.
+
+- Fixed a pipelined `sendPrepare` stealing the preceding `sendQueryParams`' `ParseComplete`, which produced a spurious `CommandOk` and shifted every later result by one. ParseComplete messages are now charged to the command that produced them via a per-command FIFO (#3).
+
 # v1.0.1.0
 
 ## Non-breaking
