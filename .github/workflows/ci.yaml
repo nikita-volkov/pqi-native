@@ -16,3 +16,5 @@ jobs:
     secrets: inherit
     with:
       test-options: --qc-max-success=${{ github.event_name == 'pull_request' && '1000' || '10000' }}
+      windows: true
+      macos: true
