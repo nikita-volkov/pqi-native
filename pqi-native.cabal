@@ -143,7 +143,12 @@ library
     pqi-native:transport,
     ptr-peeker ^>=0.2,
     ptr-poker ^>=0.1.3,
-    unix >=2.7 && <2.9,
+
+  if !os(windows)
+    build-depends: unix >=2.7 && <2.9
+
+  if os(windows)
+    build-depends: Win32 >=2.6 && <2.15
 
 test-suite native-test
   import: test

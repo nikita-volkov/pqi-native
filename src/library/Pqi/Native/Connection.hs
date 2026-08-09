@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -- | The native connection: its mutable state, conninfo parsing, the
 -- startup\/authentication handshake, and the interleave-aware receive loop that
 -- the higher-level query code is built on.
@@ -29,7 +31,11 @@ import Pqi.Native.Transport.Message
 import Pqi.Native.Types (formatErrorFields)
 import qualified PtrPoker.Write as Poker
 import System.Environment (lookupEnv)
+#if defined(mingw32_HOST_OS)
+import System.Win32.Info.Computer (getUserName)
+#else
 import System.Posix.User (getEffectiveUserName)
+#endif
 
 -- | Parsed connection parameters (the @key=value@ subset we support).
 data ConnInfo = ConnInfo
@@ -47,27 +53,55 @@ data ConnInfo = ConnInfo
 
 -- | Parse a conninfo string in either @key=value@ or @postgresql:\/\/@ URI
 -- format. Unquoted key=value values only; URI values are percent-decoded.
--- @.pgpass@ is not supported. When @user@ is omitted it is resolved like libpq
--- (see 'defaultUser'), which is why this lives in 'IO'.
-parseConnInfo :: ByteString -> IO ConnInfo
-parseConnInfo raw = do
-  dfltUser <- defaultUser
-  pure
-    if
-      | "postgresql://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 13 raw)
-      | "postgres://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 11 raw)
-      | otherwise -> parseKeyValue dfltUser raw
+-- @.pgpass@ is not supported.
+--
+-- The @dfltUser@ argument is the already-resolved default user (see
+-- 'resolveDefaultUser'), used whenever the conninfo omits @user@. It is passed
+-- in explicitly because resolving it is the one IO effect this otherwise-pure
+-- parser needs.
+parseConnInfo :: ByteString -> ByteString -> ConnInfo
+parseConnInfo raw dfltUser =
+  if
+    | "postgresql://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 13 raw)
+    | "postgres://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 11 raw)
+    | otherwise -> parseKeyValue dfltUser raw
 
 -- | Resolve the default @user@ the way libpq does (@conninfo_add_defaults@ /
 -- @pg_fe_getauthname@ in @fe-connect.c@): the @PGUSER@ environment variable if
 -- set and non-empty, otherwise the operating-system login name
--- (@getpwuid(geteuid())->pw_name@ on Unix).
-defaultUser :: IO ByteString
-defaultUser = do
+-- (@getpwuid(geteuid())->pw_name@ on Unix, @GetUserName@ on Windows).
+--
+-- Returns @Left msg@ if neither is available. Mirroring libpq, a lookup failure
+-- must be surfaced by the caller as a 'ConnectionBad' connection (see
+-- 'establish') rather than attempting to connect.
+resolveDefaultUser :: IO (Either String ByteString)
+resolveDefaultUser = do
   pguser <- lookupEnv "PGUSER"
   case pguser of
-    Just u | not (null u) -> pure (ByteString.Char8.pack u)
-    _ -> ByteString.Char8.pack <$> getEffectiveUserName
+    Just u | not (null u) -> pure (Right (ByteString.Char8.pack u))
+    _ -> do
+      result <- try @SomeException (ByteString.Char8.pack <$> platformUserName)
+      pure case result of
+        Right name -> Right name
+        Left err -> Left (platformUserNameLookupFailureMessage <> ": " <> show err)
+
+-- | The operating-system login name, via the same call libpq uses:
+-- 'getEffectiveUserName' (@getpwuid(geteuid())@) on Unix, 'getUserName'
+-- (@GetUserName@) on Windows.
+platformUserName :: IO String
+#if defined(mingw32_HOST_OS)
+platformUserName = getUserName
+#else
+platformUserName = getEffectiveUserName
+#endif
+
+#if defined(mingw32_HOST_OS)
+platformUserNameLookupFailureMessage :: String
+platformUserNameLookupFailureMessage = "user name lookup failure"
+#else
+platformUserNameLookupFailureMessage :: String
+platformUserNameLookupFailureMessage = "could not look up local user name"
+#endif
 
 parseKeyValue :: ByteString -> ByteString -> ConnInfo
 parseKeyValue dfltUser raw =
@@ -255,28 +289,41 @@ setError connection message = do
 -- message, and run the authentication\/startup handshake. Like libpq, a failed
 -- connection (whether due to a network error or a rejected handshake) yields a
 -- 'ConnectionBad' connection rather than throwing.
+-- | Open a connection: resolve the default user, resolve and connect the
+-- socket, send the startup message, and run the authentication\/startup
+-- handshake. Like libpq, a failed connection - whether due to a user-name
+-- lookup failure, a network error or a rejected handshake - yields a
+-- 'ConnectionBad' connection rather than throwing.
 establish :: ByteString -> IO Connection
 establish conninfo = do
-  info <- parseConnInfo conninfo
-  transportResult <- try @IOException (Transport.connect (host info) (port info))
-  case transportResult of
-    Left err -> do
+  userResult <- resolveDefaultUser
+  case userResult of
+    Left message -> do
       transport <- Transport.unconnected
-      connection <- newConnection False transport info
-      setError connection ("could not connect to server: " <> ByteString.Char8.pack (show err))
+      connection <- newConnection False transport (parseConnInfo conninfo "")
+      setError connection (ByteString.Char8.pack message)
       pure connection
-    Right transport -> do
-      connection <- newConnection False transport info
-      sendMessage connection (startupMessage (startupParams info))
-      handshake connection
-      pure connection
+    Right dfltUser -> do
+      let info = parseConnInfo conninfo dfltUser
+      transportResult <- try @IOException (Transport.connect (host info) (port info))
+      case transportResult of
+        Left err -> do
+          transport <- Transport.unconnected
+          connection <- newConnection False transport info
+          setError connection ("could not connect to server: " <> ByteString.Char8.pack (show err))
+          pure connection
+        Right transport -> do
+          connection <- newConnection False transport info
+          sendMessage connection (startupMessage (startupParams info))
+          handshake connection
+          pure connection
 
 -- | A \"null\" sentinel connection (the analogue of @PQnewNullConnection@): no
 -- live socket, permanently in the 'ConnectionBad' state.
 nullConnection :: IO Connection
 nullConnection = do
   transport <- Transport.unconnected
-  info <- parseConnInfo ""
+  let info = parseConnInfo "" ""
   conn <- newConnection True transport info
   writeIORef (lastError conn) (Just "connection pointer is NULL\n")
   pure conn
