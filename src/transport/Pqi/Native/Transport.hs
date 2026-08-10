@@ -14,6 +14,7 @@ module Pqi.Native.Transport
   )
 where
 
+import Control.Exception (uninterruptibleMask_)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.IORef
@@ -83,8 +84,16 @@ receiveExactly transport n = do
 
 -- | Receive one framed message: its type byte and its body (the length prefix,
 -- which counts itself, is consumed).
+--
+-- Runs fully 'uninterruptibleMask_'ed: 'Socket.ByteString.recv' is
+-- interruptible even under a plain 'mask', so an async exception (e.g. from
+-- 'System.Timeout.timeout') landing between a @recv@ returning and its bytes
+-- being folded into 'readBuffer' would otherwise drop them - desyncing the
+-- connection's framing for every subsequent read. Deferring delivery across
+-- the whole frame mirrors how @pqi-ffi@'s @safe@ FFI call into @libpq@ is
+-- immune to the same hazard.
 receiveFrame :: Transport -> IO (Word8, ByteString)
-receiveFrame transport = do
+receiveFrame transport = uninterruptibleMask_ do
   header <- receiveExactly transport 5
   let typeByte = ByteString.head header
       frameLength = decodeInt32BE (ByteString.drop 1 header)

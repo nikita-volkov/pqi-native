@@ -1,3 +1,9 @@
+# v1.0.1.2
+
+## Fixes
+
+- Fixed an async exception (e.g. from `System.Timeout.timeout`) landing mid-read permanently desyncing a connection's message framing. `Transport.receiveFrame` now runs `uninterruptibleMask_`ed, so a frame is either read to completion or not started, mirroring how `pqi-ffi`'s `safe` FFI call into `libpq` is structurally immune to the same hazard. Caught by the differential coverage in `pqi-conformance` 1.0.3.0 (#5).
+
 # v1.0.1.1
 
 ## Fixes
