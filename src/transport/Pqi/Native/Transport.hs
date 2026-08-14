@@ -14,7 +14,7 @@ module Pqi.Native.Transport
   )
 where
 
-import Control.Exception (uninterruptibleMask_)
+import Control.Exception (mask_)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.IORef
@@ -64,45 +64,60 @@ socketFd transport = fromIntegral <$> Socket.unsafeFdSocket (socket transport)
 send :: Transport -> Poker.Write -> IO ()
 send transport write = Socket.ByteString.sendAll (socket transport) (Poker.toByteString write)
 
--- | Read exactly @n@ bytes, looping over @recv@ (which yields up to @n@) and
--- buffering any overshoot. Throws on EOF before @n@ bytes arrive.
-receiveExactly :: Transport -> Int -> IO ByteString
-receiveExactly transport n = do
-  buffered <- readIORef (readBuffer transport)
-  go buffered
+-- | Ensure the read buffer holds at least @n@ bytes, pulling from the socket
+-- as needed. Throws on EOF before @n@ bytes are available.
+--
+-- The wait for bytes is deliberately left interruptible. Nothing has been
+-- consumed at this point, so a caller that gives up here loses nothing - and,
+-- crucially, is /able/ to give up. A caller blocked on a message the server
+-- will never send (an aborted pipeline whose bookkeeping has drifted, say)
+-- must stay abandonable by 'System.Timeout.timeout'; masking the wait
+-- uninterruptibly turns that stall into a deadlock no timer can break.
+--
+-- Only the step that moves bytes off the socket and into the buffer is masked,
+-- which is all the atomicity the framing needs: an async exception can never
+-- land in the gap between @recv@ returning and its bytes being recorded, so
+-- bytes are never dropped. @recv@ itself stays interruptible inside 'mask_',
+-- so the blocking wait keeps its abandonability.
+fillTo :: Transport -> Int -> IO ()
+fillTo transport n = go
   where
-    go accumulated
-      | ByteString.length accumulated >= n = do
-          let (result, rest) = ByteString.splitAt n accumulated
-          writeIORef (readBuffer transport) rest
-          pure result
-      | otherwise = do
-          chunk <- Socket.ByteString.recv (socket transport) (max 4096 (n - ByteString.length accumulated))
+    go = do
+      buffered <- readIORef (readBuffer transport)
+      let missing = n - ByteString.length buffered
+      when (missing > 0) do
+        closed <- mask_ do
+          chunk <- Socket.ByteString.recv (socket transport) (max 4096 missing)
           if ByteString.null chunk
-            then ioError (mkIOError eofErrorType "pqi-native: connection closed by server" Nothing Nothing)
-            else go (accumulated <> chunk)
+            then pure True
+            else do
+              modifyIORef' (readBuffer transport) (<> chunk)
+              pure False
+        when closed do
+          ioError (mkIOError eofErrorType "pqi-native: connection closed by server" Nothing Nothing)
+        go
 
 -- | Receive one framed message: its type byte and its body (the length prefix,
 -- which counts itself, is consumed).
 --
--- Runs fully 'uninterruptibleMask_'ed: 'Socket.ByteString.recv' is
--- interruptible even under a plain 'mask', so an async exception (e.g. from
--- 'System.Timeout.timeout') landing between a @recv@ returning and its bytes
--- being folded into 'readBuffer' would otherwise drop them - desyncing the
--- connection's framing for every subsequent read. Deferring delivery across
--- the whole frame mirrors how @pqi-ffi@'s @safe@ FFI call into @libpq@ is
--- immune to the same hazard.
+-- Buffering the whole frame before consuming any of it keeps the framing
+-- atomic without masking the wait: an async exception landing while the frame
+-- is still incomplete leaves the buffer untouched, and the frame is taken out
+-- of the buffer in a single 'atomicModifyIORef'' step. The earlier shape -
+-- consuming the header, then blocking again for the body - is what made a
+-- mid-read interrupt desync the connection, and what an outer
+-- 'Control.Exception.uninterruptibleMask_' was papering over at the cost of
+-- making every stall permanent.
 receiveFrame :: Transport -> IO (Word8, ByteString)
-receiveFrame transport = uninterruptibleMask_ do
-  header <- receiveExactly transport 5
-  let typeByte = ByteString.head header
-      frameLength = decodeInt32BE (ByteString.drop 1 header)
-      bodyLength = frameLength - 4
-  body <-
-    if bodyLength > 0
-      then receiveExactly transport bodyLength
-      else pure ByteString.empty
-  pure (typeByte, body)
+receiveFrame transport = do
+  fillTo transport 5
+  header <- ByteString.take 5 <$> readIORef (readBuffer transport)
+  let frameLength = decodeInt32BE (ByteString.drop 1 header)
+      frameSize = 5 + max 0 (frameLength - 4)
+  fillTo transport frameSize
+  atomicModifyIORef' (readBuffer transport) \buffered ->
+    let (frame, rest) = ByteString.splitAt frameSize buffered
+     in (rest, (ByteString.head frame, ByteString.drop 5 frame))
 
 -- | Read bytes until the peer closes the connection (EOF), discarding them.
 -- Used by the cancel path to mirror libpq's behaviour: keep the socket open

@@ -1,3 +1,15 @@
+# v1.0.1.3
+
+## Fixes
+
+- Fixed an async exception around an aborted pipeline leaving a connection permanently stuck, with no timer able to reclaim it. Two changes, which are only a fix together:
+
+  - `Query.getNextResult` now runs `mask_`ed. The connection's result bookkeeping - the pending-command counter, the separator flag, the `ParseComplete` origin FIFO - lives in separate `IORef`s that one logical transition updates in sequence. An interrupt landing between two of those updates left them inconsistent, and an inconsistent pair sends the next `getNextResult` off to wait for a message the backend has already decided not to send.
+
+  - `Transport.receiveFrame` no longer runs `uninterruptibleMask_`ed. It buffers a whole frame before consuming any of it and takes it out of the buffer in one atomic step, so the framing 1.0.1.2 set out to protect stays intact - but the blocking wait is masked only across moving bytes off the socket, not across waiting for them. The 1.0.1.2 shape made every wait unabandonable, which is what turned the stall above into a deadlock `System.Timeout.timeout` could not break.
+
+  Found via a hang in `hasql`'s `Integration.Sharing.Connection.Use.PipelineAbortedInterruptionCleanup`, which wedged only under concurrent load and only on this adapter.
+
 # v1.0.1.2
 
 ## Fixes

@@ -17,6 +17,7 @@ module Pqi.Native.Query
   )
 where
 
+import Control.Exception (mask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Pqi (ConnStatus (..), ExecStatus (..), Format (..), PipelineStatus (..))
@@ -168,8 +169,19 @@ sendDescribePortal connection name = do
 -- result set, and a 'PipelineSync' result is returned for each @Sync@
 -- boundary. In single-row mode each data row is delivered as a separate
 -- 'SingleTuple' result followed by a final 'TuplesOk' with no rows.
+--
+-- Runs 'mask_'ed. The connection's result bookkeeping - the pending-command
+-- counter, the separator flag, the @ParseComplete@ origin FIFO, the pipeline
+-- status - lives in separate 'IORef's that a single logical transition
+-- updates one after another. An async exception landing between two of those
+-- updates leaves the pair inconsistent, and an inconsistent pair is not merely
+-- wrong: it sends the next 'getNextResult' down the @readAndProcess@ path to
+-- wait for a message the backend has already decided not to send, which is a
+-- stall with no timer behind it. Masking keeps each transition atomic. The
+-- blocking read inside stays interruptible (see 'Transport.receiveFrame'), so
+-- this costs no abandonability.
 getNextResult :: Connection -> IO (Maybe NativeResult)
-getNextResult connection = do
+getNextResult connection = mask_ do
   pending <- readIORef (asyncPending connection)
   if not pending
     then pure Nothing
