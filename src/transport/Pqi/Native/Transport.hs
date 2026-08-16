@@ -4,6 +4,8 @@
 module Pqi.Native.Transport
   ( Transport,
     connect,
+    isUnixSocketHost,
+    unixSocketPath,
     unconnected,
     close,
     send,
@@ -30,9 +32,31 @@ data Transport = Transport
     readBuffer :: IORef ByteString
   }
 
--- | Open a TCP connection to the given host and port.
+-- | Open a connection to the given host and port. Mirroring libpq: if the
+-- host looks like an absolute path (starts with @\/@ - see 'isUnixSocketHost'),
+-- it names a Unix-domain socket /directory/ rather than a TCP host, and the
+-- connection is made to the socket file @'unixSocketPath' host port@ within
+-- it. Otherwise a TCP connection is made, resolving the host via DNS.
 connect :: ByteString -> Int -> IO Transport
-connect host port = do
+connect host port
+  | isUnixSocketHost host = connectUnix (unixSocketPath host port)
+  | otherwise = connectTcp host port
+
+-- | Whether a conninfo @host@ value names a Unix-domain socket directory
+-- rather than a TCP host - i.e. it looks like an absolute path, per libpq's
+-- rule: "If a host name looks like an absolute path name, it specifies
+-- Unix-domain communication rather than TCP/IP communication".
+isUnixSocketHost :: ByteString -> Bool
+isUnixSocketHost host = not (ByteString.null host) && ByteString.head host == 0x2f -- '/'
+
+-- | The path of the socket file libpq expects within a Unix-domain socket
+-- directory: @\<directory\>\/.s.PGSQL.\<port\>@.
+unixSocketPath :: ByteString -> Int -> FilePath
+unixSocketPath directory port = ByteString.Char8.unpack directory <> "/.s.PGSQL." <> show port
+
+-- | Open a TCP connection to the given host and port.
+connectTcp :: ByteString -> Int -> IO Transport
+connectTcp host port = do
   let hints = Socket.defaultHints {Socket.addrSocketType = Socket.Stream}
   addresses <-
     Socket.getAddrInfo (Just hints) (Just (ByteString.Char8.unpack host)) (Just (show port))
@@ -41,6 +65,18 @@ connect host port = do
     address : _ -> do
       sock <- Socket.socket (Socket.addrFamily address) (Socket.addrSocketType address) (Socket.addrProtocol address)
       Socket.connect sock (Socket.addrAddress address)
+      buffer <- newIORef ByteString.empty
+      pure Transport {socket = sock, readBuffer = buffer}
+
+-- | Open a connection to a Unix-domain socket at the given path (the
+-- directory\/@\.s\.PGSQL\.\<port\>@ file, per 'unixSocketPath').
+connectUnix :: FilePath -> IO Transport
+connectUnix path
+  | not Socket.isUnixDomainSocketAvailable =
+      ioError (userError "pqi-native: Unix-domain sockets are not supported on this platform")
+  | otherwise = do
+      sock <- Socket.socket Socket.AF_UNIX Socket.Stream 0
+      Socket.connect sock (Socket.SockAddrUnix path)
       buffer <- newIORef ByteString.empty
       pure Transport {socket = sock, readBuffer = buffer}
 
