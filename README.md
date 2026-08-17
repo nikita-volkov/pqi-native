@@ -55,9 +55,7 @@ is verified against a password-auth PostgreSQL 17 container (which defaults to
 `scram-sha-256`).
 
 Transport: plain TCP and Unix-domain sockets. A `host` value that's an
-absolute path names a socket directory instead of a TCP host, and (with the
-`libpq-compatible-host-defaults` Cabal flag, on by default) omitting `host`
-altogether defaults the way libpq itself does: `PGHOST` if set, otherwise a
-Unix-domain socket in `/tmp` on Unix-like systems, or `localhost` on Windows.
-Disable the flag to keep the pre-1.1 behaviour of always defaulting to
-`localhost` over TCP.
+absolute path names a socket directory instead of a TCP host, and omitting
+`host` altogether defaults the way libpq itself does: `PGHOST` if set,
+otherwise a Unix-domain socket in `/tmp` on Unix-like systems, or `localhost`
+on Windows.

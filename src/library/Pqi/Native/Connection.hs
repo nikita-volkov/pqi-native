@@ -105,21 +105,15 @@ platformUserNameLookupFailureMessage = "could not look up local user name"
 #endif
 
 -- | The default @host@ used when a conninfo omits it (or gives an empty
--- value).
+-- value), matching libpq's own @conninfo_add_defaults@ / @PQconnectdbParams@
+-- resolution: @PGHOST@ if set and non-empty, otherwise 'defaultUnixSocketDir'
+-- (or @localhost@ on Windows, where there's no Unix-domain default to fall
+-- back to).
 --
--- Depends on the @libpq-compatible-host-defaults@ Cabal flag;
---
--- * Enabled (the default): matches libpq's own @conninfo_add_defaults@ /
---   @PQconnectdbParams@ resolution - @PGHOST@ if set and non-empty,
---   otherwise 'defaultUnixSocketDir' (or @localhost@ on Windows).
---
--- * Disabled: always @localhost@ over TCP, regardless of platform or
---   @PGHOST@ - pqi-native's legacy behaviour prior to the flag.
---
--- An explicit @host=\/some\/path@ (or its URI equivalent) always connects
--- via Unix-domain socket on both settings - see 'Transport.isUnixSocketHost'.
+-- An explicit @host=\/some\/path@ (or its URI equivalent) always connects via
+-- Unix-domain socket regardless of this default - see
+-- 'Transport.isUnixSocketHost'.
 resolveDefaultHost :: IO ByteString
-#if defined(LIBPQ_COMPATIBLE_HOST_DEFAULTS)
 resolveDefaultHost = do
   pghost <- lookupEnv "PGHOST"
   pure $ case pghost of
@@ -150,9 +144,6 @@ compiledDefaultHost = defaultUnixSocketDir
 #if !defined(mingw32_HOST_OS)
 defaultUnixSocketDir :: ByteString
 defaultUnixSocketDir = PQI_NATIVE_DEFAULT_UNIX_SOCKET_DIR
-#endif
-#else
-resolveDefaultHost = pure "localhost"
 #endif
 
 parseKeyValue :: ByteString -> ByteString -> ByteString -> ConnInfo

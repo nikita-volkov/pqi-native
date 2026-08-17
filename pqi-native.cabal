@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: pqi-native
-version: 1.1.0.0
+version: 1.0.1.4
 category: Database, PostgreSQL
 synopsis: Native (pure-Haskell) adapter for pqi
 description:
@@ -33,27 +33,6 @@ extra-doc-files:
 source-repository head
   type: git
   location: https://github.com/nikita-volkov/pqi-native
-
-flag libpq-compatible-host-defaults
-  description:
-    When enabled (the default), an omitted or empty @host@ conninfo
-    parameter is resolved the way libpq itself resolves it: @PGHOST@ if set
-    and non-empty, otherwise a Unix-domain socket in the platform's default
-    socket directory (@\/tmp@ on Unix-like systems - see
-    @Pqi.Native.Connection.defaultUnixSocketDir@ for how to override this
-    for a distribution that compiles its own @libpq@ with a different
-    default - or @localhost@ on Windows), matching @pqi-ffi@\/real @libpq@
-    exactly.
-
-    When disabled, an omitted @host@ always defaults to @localhost@ over
-    TCP regardless of platform or @PGHOST@, matching pqi-native's behaviour
-    prior to this flag's introduction.
-
-    This only affects the *default* used when @host@ is entirely absent; an
-    explicit @host=\/some\/path@ (or a URI equivalent) always connects via
-    Unix-domain socket regardless of this flag, on both settings.
-  default: True
-  manual: True
 
 common base
   default-language: Haskell2010
@@ -170,9 +149,6 @@ library
 
   if os(windows)
     build-depends: Win32 >=2.6 && <2.15
-
-  if flag(libpq-compatible-host-defaults)
-    cpp-options: -DLIBPQ_COMPATIBLE_HOST_DEFAULTS
 
 test-suite native-test
   import: test

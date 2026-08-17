@@ -1,14 +1,10 @@
-# v1.1.0.0
+# v1.0.1.4
 
-## Breaking (with an opt-out)
+## Fixes
 
-- Added a new `libpq-compatible-host-defaults` Cabal flag, **enabled by default**. With it enabled, a conninfo with no `host` (or an empty host) now defaults the way libpq itself does: the `PGHOST` environment variable if set and non-empty, otherwise a Unix-domain socket in `/tmp` on Unix-like systems (see `Pqi.Native.Connection.defaultUnixSocketDir`'s Haddock for how a distribution that compiles its own `libpq` with a different default, e.g. Fedora's `/run/postgresql`, can match it via `cabal.project` - no source patch needed), or `localhost` on Windows, unchanged. This matches `pqi-ffi`/real libpq exactly, closing a gap where the two adapters silently disagreed on what an omitted `host` means. Programs that omitted `host` to reach a local, TCP-only server should now set `host=localhost` explicitly, or build with `flags: -libpq-compatible-host-defaults` (in `cabal.project`) to keep the previous behaviour without any code change.
+- Fixed missing support for connecting over a Unix-domain socket (#6). A `host` value that looks like an absolute path (e.g. `host=/var/run/postgresql`) names a socket directory rather than a TCP host, and the connection is made to a `.s.PGSQL.<port>` unix-domain socket in that directory, mirroring libpq's rule for the `host` conninfo parameter. A conninfo with no `host` (or an empty one) now defaults the way libpq itself does: the `PGHOST` environment variable if set and non-empty, otherwise a Unix-domain socket in `/tmp` on Unix-like systems (see `Pqi.Native.Connection.defaultUnixSocketDir`'s Haddock for how a distribution that compiles its own `libpq` with a different default, e.g. Fedora's `/run/postgresql`, can match it via `cabal.project` - no source patch needed), or `localhost` on Windows, unchanged. Connect-failure and handshake-failure messages now describe the socket path rather than a host/port pair when connecting this way.
 
   No privilege-elevation guard is applied to reading `PGHOST` (or the existing `PGUSER` lookup): libpq itself reads these with plain `getenv()`, with no `secure_getenv`/`geteuid`-vs-`getuid` check anywhere in `fe-connect.c` - responsibility for scrubbing the environment before opening a database connection is on any setuid/setgid caller, exactly as it is for libpq.
-
-## Non-breaking
-
-- Added support for connecting over a Unix-domain socket: a `host` value that looks like an absolute path (e.g. `host=/var/run/postgresql`) names a socket directory rather than a TCP host, and the connection is made to a `.s.PGSQL.<port>` unix-domain socket in that directory, mirroring libpq's rule for the `host` conninfo parameter. Connect-failure and handshake-failure messages now describe the socket path rather than a host/port pair when connecting this way. Resolves #6.
 
 # v1.0.1.3
 
