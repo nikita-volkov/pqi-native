@@ -59,6 +59,19 @@ asyncPreparedWrite name params resultFormat =
     <> describePortalMessage ""
     <> executeMessage "" 0
 
+-- * Parameter-count limit
+
+-- | The largest parameter count the wire protocol's 16-bit count fields can
+-- carry, matching libpq's @PQ_QUERY_PARAM_MAX_LIMIT@. 'Parse' and 'Bind'
+-- messages encode their parameter count as an 'Int16'; past this limit that
+-- encoding wraps around instead of overflowing, so the count must be
+-- rejected locally before it corrupts the message.
+maxParamCount :: Int
+maxParamCount = 65535
+
+tooManyParams :: [a] -> Bool
+tooManyParams = (> maxParamCount) . length
+
 -- * Synchronous flows
 
 -- | Simple query. Returns the last result, mirroring @PQexec@.
@@ -69,21 +82,27 @@ exec connection sql = withReady connection do
 
 -- | Parameterized query via the extended protocol.
 execParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO (Maybe NativeResult)
-execParams connection sql params resultFormat = withReady connection do
-  sendMessage connection (paramsWrite sql params resultFormat)
-  Just <$> collectExtended connection sql
+execParams connection sql params resultFormat
+  | tooManyParams params = pure Nothing
+  | otherwise = withReady connection do
+      sendMessage connection (paramsWrite sql params resultFormat)
+      Just <$> collectExtended connection sql
 
 -- | Prepare a named statement.
 prepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO (Maybe NativeResult)
-prepare connection name sql parameterTypes = withReady connection do
-  sendMessage connection (prepareWrite name sql parameterTypes)
-  Just <$> collectExtended connection sql
+prepare connection name sql parameterTypes
+  | maybe False tooManyParams parameterTypes = pure Nothing
+  | otherwise = withReady connection do
+      sendMessage connection (prepareWrite name sql parameterTypes)
+      Just <$> collectExtended connection sql
 
 -- | Execute a previously prepared statement.
 execPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO (Maybe NativeResult)
-execPrepared connection name params resultFormat = withReady connection do
-  sendMessage connection (preparedWrite name params resultFormat)
-  Just <$> collectExtended connection ""
+execPrepared connection name params resultFormat
+  | tooManyParams params = pure Nothing
+  | otherwise = withReady connection do
+      sendMessage connection (preparedWrite name params resultFormat)
+      Just <$> collectExtended connection ""
 
 -- * Asynchronous flows
 
@@ -112,38 +131,44 @@ sendQuery connection sql = sendAsync connection sql (queryMessage sql)
 -- Extended query: include Sync when not in pipeline mode; omit Sync in
 -- pipeline mode (the caller drives sync boundaries via 'pipelineSync').
 sendQueryParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO Bool
-sendQueryParams connection sql params resultFormat = do
-  pipeline <- inPipeline connection
-  ok <-
-    sendAsync connection sql
-      $ if pipeline
-        then asyncParamsWrite sql params resultFormat
-        else paramsWrite sql params resultFormat
-  -- 'sendQueryParams' drives the extended protocol and so always sends an
-  -- unnamed @Parse@, whose @ParseComplete@ must fold into this command's own
-  -- result (like 'sendQueryPrepared'). Record its origin so it is not mistaken
-  -- for the terminal @ParseComplete@ of a pipelined 'sendPrepare'.
-  when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> False)
-  pure ok
+sendQueryParams connection sql params resultFormat
+  | tooManyParams params = pure False
+  | otherwise = do
+      pipeline <- inPipeline connection
+      ok <-
+        sendAsync connection sql
+          $ if pipeline
+            then asyncParamsWrite sql params resultFormat
+            else paramsWrite sql params resultFormat
+      -- 'sendQueryParams' drives the extended protocol and so always sends an
+      -- unnamed @Parse@, whose @ParseComplete@ must fold into this command's own
+      -- result (like 'sendQueryPrepared'). Record its origin so it is not mistaken
+      -- for the terminal @ParseComplete@ of a pipelined 'sendPrepare'.
+      when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> False)
+      pure ok
 
 sendPrepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO Bool
-sendPrepare connection name sql parameterTypes = do
-  pipeline <- inPipeline connection
-  ok <-
-    sendAsync connection sql
-      $ if pipeline
-        then parseMessage name sql (fromMaybe [] parameterTypes)
-        else prepareWrite name sql parameterTypes
-  when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> True)
-  pure ok
+sendPrepare connection name sql parameterTypes
+  | maybe False tooManyParams parameterTypes = pure False
+  | otherwise = do
+      pipeline <- inPipeline connection
+      ok <-
+        sendAsync connection sql
+          $ if pipeline
+            then parseMessage name sql (fromMaybe [] parameterTypes)
+            else prepareWrite name sql parameterTypes
+      when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> True)
+      pure ok
 
 sendQueryPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO Bool
-sendQueryPrepared connection name params resultFormat = do
-  pipeline <- inPipeline connection
-  sendAsync connection ""
-    $ if pipeline
-      then asyncPreparedWrite name params resultFormat
-      else preparedWrite name params resultFormat
+sendQueryPrepared connection name params resultFormat
+  | tooManyParams params = pure False
+  | otherwise = do
+      pipeline <- inPipeline connection
+      sendAsync connection ""
+        $ if pipeline
+          then asyncPreparedWrite name params resultFormat
+          else preparedWrite name params resultFormat
 
 sendDescribePrepared :: Connection -> ByteString -> IO Bool
 sendDescribePrepared connection name = do

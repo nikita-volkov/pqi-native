@@ -1,3 +1,9 @@
+# v1.0.1.5
+
+## Fixes
+
+- `sendQueryParams`, `execParams`, `sendPrepare`, `prepare`, `sendQueryPrepared`, and `execPrepared` now reject a parameter list (or, for `prepare`\/`sendPrepare`, a parameter-type list) longer than 65535 locally, without writing anything to the socket, mirroring `libpq`'s `PQ_QUERY_PARAM_MAX_LIMIT` check. The `Parse`\/`Bind` messages encode their parameter count as a 16-bit field; past the limit `fromIntegral` silently wrapped it (65536 became 0), producing a malformed message the server rejected with `invalid message format` and leaving the connection desynchronized - inside a pipeline, every command dispatched before the failing one was left with its results undrained. Caught by the differential coverage added in `pqi-conformance` 1.0.5.0. Found via `hasql` issue #326.
+
 # v1.0.1.4
 
 ## Fixes
