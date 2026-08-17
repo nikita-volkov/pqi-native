@@ -246,8 +246,8 @@ getNextResult connection = mask_ do
     -- Haddock on 'Connection'). Called at every terminal message besides a
     -- 'ParseComplete' that itself terminates the command.
     popOriginIfPending pipeStatus builder =
-      when (pipeStatus /= PipelineOff && not (accOriginPopped builder)) $
-        void (popPendingParseOrigin connection)
+      when (pipeStatus /= PipelineOff && not (accOriginPopped builder))
+        $ void (popPendingParseOrigin connection)
 
     go singleRow builder = do
       pipeStatus <- readIORef (pipelineStatus connection)
