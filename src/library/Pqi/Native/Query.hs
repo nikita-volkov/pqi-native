@@ -144,7 +144,7 @@ sendQueryParams connection sql params resultFormat
       -- unnamed @Parse@, whose @ParseComplete@ must fold into this command's own
       -- result (like 'sendQueryPrepared'). Record its origin so it is not mistaken
       -- for the terminal @ParseComplete@ of a pipelined 'sendPrepare'.
-      when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> False)
+      when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> Just False)
       pure ok
 
 sendPrepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO Bool
@@ -157,15 +157,24 @@ sendPrepare connection name sql parameterTypes
           $ if pipeline
             then parseMessage name sql (fromMaybe [] parameterTypes)
             else prepareWrite name sql parameterTypes
-      when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> True)
+      when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> Just True)
       pure ok
+
+-- | Push a @Nothing@ origin for a pipelined command that sends no @Parse@
+-- (so has no @ParseComplete@ to fold or terminate on): it still occupies one
+-- slot in the FIFO, popped and discarded at its own terminal message.
+sendAsyncNoOrigin :: Connection -> Bool -> ByteString -> Poker.Write -> IO Bool
+sendAsyncNoOrigin connection pipeline sql write = do
+  ok <- sendAsync connection sql write
+  when (ok && pipeline) $ modifyIORef' (pendingParseOrigins connection) (Seq.|> Nothing)
+  pure ok
 
 sendQueryPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO Bool
 sendQueryPrepared connection name params resultFormat
   | tooManyParams params = pure False
   | otherwise = do
       pipeline <- inPipeline connection
-      sendAsync connection ""
+      sendAsyncNoOrigin connection pipeline ""
         $ if pipeline
           then asyncPreparedWrite name params resultFormat
           else preparedWrite name params resultFormat
@@ -173,7 +182,7 @@ sendQueryPrepared connection name params resultFormat
 sendDescribePrepared :: Connection -> ByteString -> IO Bool
 sendDescribePrepared connection name = do
   pipeline <- inPipeline connection
-  sendAsync connection ""
+  sendAsyncNoOrigin connection pipeline ""
     $ if pipeline
       then describeStatementMessage name
       else describeStatementMessage name <> syncMessage
@@ -181,7 +190,7 @@ sendDescribePrepared connection name = do
 sendDescribePortal :: Connection -> ByteString -> IO Bool
 sendDescribePortal connection name = do
   pipeline <- inPipeline connection
-  sendAsync connection ""
+  sendAsyncNoOrigin connection pipeline ""
     $ if pipeline
       then describePortalMessage name
       else describePortalMessage name <> syncMessage
@@ -232,6 +241,14 @@ getNextResult connection = mask_ do
         modifyIORef' (pendingCommands connection) (subtract 1)
         writeIORef (pipelineSeparatorPending connection) True
 
+    -- Pop and discard this command's 'pendingParseOrigins' entry if it hasn't
+    -- already been consumed by its own 'ParseComplete' (see the field's
+    -- Haddock on 'Connection'). Called at every terminal message besides a
+    -- 'ParseComplete' that itself terminates the command.
+    popOriginIfPending pipeStatus builder =
+      when (pipeStatus /= PipelineOff && not (accOriginPopped builder)) $
+        void (popPendingParseOrigin connection)
+
     go singleRow builder = do
       pipeStatus <- readIORef (pipelineStatus connection)
       -- In aborted pipeline mode, if the server has already sent nothing for
@@ -241,6 +258,11 @@ getNextResult connection = mask_ do
       pending <- readIORef (pendingCommands connection)
       if pipeStatus == PipelineAborted && pending > 0
         then do
+          -- This command is being synthesized without ever reading a
+          -- message for it (the server sends nothing for a discarded
+          -- command), so its origin - if it pushed one - is necessarily
+          -- still unpopped.
+          popOriginIfPending pipeStatus builder
           modifyIORef' (pendingCommands connection) (subtract 1)
           writeIORef (pipelineSeparatorPending connection) True
           pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] ""))
@@ -273,10 +295,11 @@ getNextResult connection = mask_ do
               then popPendingParseOrigin connection
               else pure Nothing
           case origin of
-            Just True -> do
+            Just (Just True) -> do
               finishCommand pipeStatus
               pure (Just (NativeResult CommandOk [] [] Nothing Map.empty [] ""))
-            _ -> go singleRow builder {accHadResponse = True}
+            Just _ -> go singleRow builder {accHadResponse = True, accOriginPopped = True}
+            Nothing -> go singleRow builder {accHadResponse = True}
         BindComplete ->
           go singleRow builder {accHadResponse = True}
         CloseComplete ->
@@ -290,10 +313,12 @@ getNextResult connection = mask_ do
               pure (Just (NativeResult TuplesOk (accFields builder) [] (Just tag) Map.empty [] ""))
             else do
               writeIORef (lastError connection) (Just "")
+              popOriginIfPending pipeStatus builder
               finishCommand pipeStatus
               pure (Just (commandResult builder (Just tag)))
         EmptyQueryResponse -> do
           writeIORef (lastError connection) (Just "")
+          popOriginIfPending pipeStatus builder
           finishCommand pipeStatus
           pure (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
         ErrorResponse fs -> do
@@ -302,10 +327,12 @@ getNextResult connection = mask_ do
             PipelineAborted -> do
               -- Should not normally happen (server discards commands in abort
               -- mode) but handle defensively.
+              popOriginIfPending pipeStatus builder
               finishCommand pipeStatus
               pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] ""))
             PipelineOn -> do
               writeIORef (pipelineStatus connection) PipelineAborted
+              popOriginIfPending pipeStatus builder
               finishCommand PipelineOn
               pure (Just (NativeResult FatalError [] [] Nothing errMap [] ""))
             PipelineOff -> do
@@ -335,12 +362,13 @@ getNextResult connection = mask_ do
               pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
         _ -> go singleRow builder
 
--- | Pop the origin of the next in-flight @ParseComplete@ in pipeline mode:
--- @True@ if it is the terminal @ParseComplete@ of a 'sendPrepare' (to be
--- materialized as 'CommandOk'), @False@ if it belongs to a 'sendQueryParams'
--- and must fold into that command's accumulating result. @Nothing@ when no
--- @Parse@ is pending (defensive: the @ParseComplete@ is then folded).
-popPendingParseOrigin :: Connection -> IO (Maybe Bool)
+-- | Pop the next in-flight pipelined command's origin: @Just (Just True)@ if
+-- it is the terminal @ParseComplete@ of a 'sendPrepare' (to be materialized
+-- as 'CommandOk'), @Just (Just False)@ if it belongs to a 'sendQueryParams'
+-- and must fold into that command's accumulating result, @Just Nothing@ for
+-- a command with no @Parse@ step. The outer @Nothing@ means the FIFO is
+-- empty (defensive: nothing is popped and the caller folds).
+popPendingParseOrigin :: Connection -> IO (Maybe (Maybe Bool))
 popPendingParseOrigin connection =
   atomicModifyIORef'
     (pendingParseOrigins connection)
@@ -402,11 +430,14 @@ data Builder = Builder
     accRevRows :: [[Maybe ByteString]],
     accParamOids :: [Word32],
     accSawRowDescription :: Bool,
-    accHadResponse :: Bool
+    accHadResponse :: Bool,
+    -- | Whether this command's 'pendingParseOrigins' entry has already been
+    -- popped (via its own 'ParseComplete'). See 'popOriginIfPending'.
+    accOriginPopped :: Bool
   }
 
 emptyBuilder :: Builder
-emptyBuilder = Builder [] [] [] False False
+emptyBuilder = Builder [] [] [] False False False
 
 -- | Collect the (possibly several) results of a simple query, up to
 -- @ReadyForQuery@. The last is what @PQexec@ returns.

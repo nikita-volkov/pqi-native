@@ -280,18 +280,31 @@ data Connection = Connection
     pipelineSeparatorPending :: IORef Bool,
     pendingSyncs :: IORef Int,
     pendingCommands :: IORef Int,
-    -- | FIFO, one entry per in-flight pipeline command that sends a @Parse@
-    -- ('sendQueryParams' or 'sendPrepare'), recording whether that command's
-    -- @ParseComplete@ is itself the terminal result. 'sendPrepare' pushes
-    -- @True@ (its @ParseComplete@ ends the command as 'CommandOk');
-    -- 'sendQueryParams' pushes @False@ (its @ParseComplete@ must fold into the
-    -- command's accumulating result, like every other extended-protocol
-    -- message, and never terminate it early). Popping the head at the right
-    -- @ParseComplete@ keeps the origins in order even when several commands are
-    -- pipelined together - a plain counter cannot, which is what let a
-    -- pipelined 'sendPrepare' steal the 'ParseComplete' of an earlier
-    -- 'sendQueryParams' and shift every later result by one.
-    pendingParseOrigins :: IORef (Seq.Seq Bool),
+    -- | FIFO, one entry per in-flight pipelined command, pushed by every
+    -- 'sendAsync' call while in pipeline mode and popped exactly once by
+    -- whichever message ends that command's processing. For a command that
+    -- sends a @Parse@ ('sendQueryParams' or 'sendPrepare') the entry records
+    -- whether that command's @ParseComplete@ is itself the terminal result:
+    -- 'sendPrepare' pushes @Just True@ (its @ParseComplete@ ends the command
+    -- as 'CommandOk'); 'sendQueryParams' pushes @Just False@ (its
+    -- @ParseComplete@ must fold into the command's accumulating result, like
+    -- every other extended-protocol message, and never terminate it early).
+    -- A command with no @Parse@ step (e.g. 'sendQueryPrepared') pushes
+    -- @Nothing@, popped (and discarded) at its own terminal message. Popping
+    -- the head at the right message keeps the origins in order even when
+    -- several commands are pipelined together - a plain counter cannot,
+    -- which is what let a pipelined 'sendPrepare' steal the 'ParseComplete'
+    -- of an earlier 'sendQueryParams' and shift every later result by one.
+    --
+    -- Every command pushes exactly one entry and must pop exactly one, even
+    -- when it fails before reaching @ParseComplete@ (e.g. a syntax error, or
+    -- being discarded after a pipeline abort): leaving that entry unpopped
+    -- would let a later, unrelated command's @ParseComplete@ pop it instead,
+    -- misattributing that later command's origin and - when the leaked entry
+    -- happens to be @Just True@ - making it terminate early as 'CommandOk'
+    -- instead of collecting its actual result (e.g. 'TuplesOk' for a
+    -- @SELECT@).
+    pendingParseOrigins :: IORef (Seq.Seq (Maybe Bool)),
     errorVerbosity :: IORef Verbosity,
     -- | The SQL text of the most recently sent query (set by sendQuery /
     -- sendQueryParams). Used when formatting error messages for async results

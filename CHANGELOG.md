@@ -1,3 +1,9 @@
+# v1.0.1.6
+
+## Fixes
+
+- Fixed a pipelined command's result getting misattributed to a later, unrelated command after a prior pipeline aborted on a server error (#9). A pipelined command that sends a `Parse` (`sendQueryParams`/`sendPrepare`) records a FIFO entry so the eventual `ParseComplete` can be charged to the right command; that entry was only ever popped by a `ParseComplete` actually arriving. A command whose `Parse` itself fails - a syntax error, or being silently discarded by the server after a pipeline abort - never gets a `ParseComplete`, so its entry was leaked. A `sendPrepare` leaks a `True` entry, and once a later, unrelated command's genuine `ParseComplete` popped that stale `True` instead of its own, that command terminated immediately as `CommandOk` instead of collecting its real result, observed as a `SELECT` returning `CommandOk` instead of `TuplesOk`. Every pipelined command now pops its FIFO entry exactly once, whether via its own `ParseComplete` or, failing that, at its own terminal message (including the synthetic result generated for a command discarded after an abort). Caught by the differential coverage added in `pqi-conformance` 1.0.5.1.
+
 # v1.0.1.5
 
 ## Fixes
