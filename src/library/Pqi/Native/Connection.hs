@@ -56,16 +56,16 @@ data ConnInfo = ConnInfo
 -- format. Unquoted key=value values only; URI values are percent-decoded.
 -- @.pgpass@ is not supported.
 --
--- The @dfltUser@ argument is the already-resolved default user (see
--- 'resolveDefaultUser'), used whenever the conninfo omits @user@. It is passed
--- in explicitly because resolving it is the one IO effect this otherwise-pure
--- parser needs.
-parseConnInfo :: ByteString -> ByteString -> ConnInfo
-parseConnInfo raw dfltUser =
+-- The @dfltUser@\/@dfltHost@ arguments are the already-resolved defaults (see
+-- 'resolveDefaultUser'\/'resolveDefaultHost'), used whenever the conninfo
+-- omits @user@\/@host@ respectively. They are passed in explicitly because
+-- resolving them is the only IO this otherwise-pure parser needs.
+parseConnInfo :: ByteString -> ByteString -> ByteString -> ConnInfo
+parseConnInfo raw dfltUser dfltHost =
   if
-    | "postgresql://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 13 raw)
-    | "postgres://" `ByteString.isPrefixOf` raw -> parseUri dfltUser (ByteString.drop 11 raw)
-    | otherwise -> parseKeyValue dfltUser raw
+    | "postgresql://" `ByteString.isPrefixOf` raw -> parseUri dfltUser dfltHost (ByteString.drop 13 raw)
+    | "postgres://" `ByteString.isPrefixOf` raw -> parseUri dfltUser dfltHost (ByteString.drop 11 raw)
+    | otherwise -> parseKeyValue dfltUser dfltHost raw
 
 -- | Resolve the default @user@ the way libpq does (@conninfo_add_defaults@ /
 -- @pg_fe_getauthname@ in @fe-connect.c@): the @PGUSER@ environment variable if
@@ -104,10 +104,52 @@ platformUserNameLookupFailureMessage :: String
 platformUserNameLookupFailureMessage = "could not look up local user name"
 #endif
 
-parseKeyValue :: ByteString -> ByteString -> ConnInfo
-parseKeyValue dfltUser raw =
+-- | The default @host@ used when a conninfo omits it (or gives an empty
+-- value), matching libpq's own @conninfo_add_defaults@ / @PQconnectdbParams@
+-- resolution: @PGHOST@ if set and non-empty, otherwise 'defaultUnixSocketDir'
+-- (or @localhost@ on Windows, where there's no Unix-domain default to fall
+-- back to).
+--
+-- An explicit @host=\/some\/path@ (or its URI equivalent) always connects via
+-- Unix-domain socket regardless of this default - see
+-- 'Transport.isUnixSocketHost'.
+resolveDefaultHost :: IO ByteString
+resolveDefaultHost = do
+  pghost <- lookupEnv "PGHOST"
+  pure $ case pghost of
+    Just h | not (null h) -> ByteString.Char8.pack h
+    _ -> compiledDefaultHost
+
+compiledDefaultHost :: ByteString
+#if defined(mingw32_HOST_OS)
+compiledDefaultHost = "localhost"
+#else
+compiledDefaultHost = defaultUnixSocketDir
+#endif
+
+#ifndef PQI_NATIVE_DEFAULT_UNIX_SOCKET_DIR
+#define PQI_NATIVE_DEFAULT_UNIX_SOCKET_DIR "/tmp"
+#endif
+
+-- | The Unix-domain socket directory used when neither @host@ nor @PGHOST@ is
+-- given (non-Windows only). Defaults to @\/tmp@, the directory the upstream
+-- @postgres.org@ @libpq@ uses. A distribution that compiles its own @libpq@
+-- with a different default can match it here via @cabal.project@. Note this
+-- needs the whole option double-quoted with the inner quotes backslash-escaped
+-- (@cabal.project@'s per-package field parser tokenizes @ghc-options@
+-- shell-style).
+--
+-- > package pqi-native
+-- >   ghc-options: "-DPQI_NATIVE_DEFAULT_UNIX_SOCKET_DIR=\"/run/postgresql\""
+#if !defined(mingw32_HOST_OS)
+defaultUnixSocketDir :: ByteString
+defaultUnixSocketDir = PQI_NATIVE_DEFAULT_UNIX_SOCKET_DIR
+#endif
+
+parseKeyValue :: ByteString -> ByteString -> ByteString -> ConnInfo
+parseKeyValue dfltUser dfltHost raw =
   ConnInfo
-    { host = get "host" "localhost",
+    { host = defaultIfEmpty dfltHost (get "host" ""),
       port = maybe 5432 fst (ByteString.Char8.readInt (get "port" "5432")),
       user = theUser,
       database = get "dbname" theUser,
@@ -124,6 +166,11 @@ parseKeyValue dfltUser raw =
         | not (ByteString.null value) -> Just (key, ByteString.drop 1 value)
       _ -> Nothing
 
+defaultIfEmpty :: ByteString -> ByteString -> ByteString
+defaultIfEmpty dflt raw
+  | ByteString.null raw = dflt
+  | otherwise = raw
+
 -- | Conninfo keys already surfaced via their own 'ConnInfo' fields, so they're
 -- excluded from 'extraParams' rather than duplicated there.
 reservedKeys :: Set.Set ByteString
@@ -132,8 +179,8 @@ reservedKeys = Set.fromList ["host", "port", "user", "dbname", "password"]
 -- | Parse the authority+path portion of a @postgresql://@ URI (scheme already
 -- stripped). Handles @[user[:password]@][host[:port]][/dbname]@; ignores query
 -- parameters other than what appears in those components.
-parseUri :: ByteString -> ByteString -> ConnInfo
-parseUri dfltUser withoutScheme =
+parseUri :: ByteString -> ByteString -> ByteString -> ConnInfo
+parseUri dfltUser dfltHost withoutScheme =
   ConnInfo {host, port, user, database, password, extraParams}
   where
     -- Split off optional "userinfo@" prefix. The '@' is unambiguous in this
@@ -189,9 +236,9 @@ parseUri dfltUser withoutScheme =
           Just c ->
             let h = ByteString.take c hostport
                 p = ByteString.drop (c + 1) hostport
-             in if ByteString.null h then ("localhost", readPort p) else (h, readPort p)
+             in if ByteString.null h then (dfltHost, readPort p) else (h, readPort p)
           Nothing ->
-            (if ByteString.null hostport then "localhost" else hostport, 5432)
+            (defaultIfEmpty dfltHost hostport, 5432)
 
     readPort bs = maybe 5432 fst (ByteString.Char8.readInt bs)
 
@@ -294,6 +341,47 @@ setError connection message = do
   writeIORef (lastError connection) (Just message)
   writeIORef (connStatus connection) ConnectionBad
 
+-- | Format an initial-connect failure (the socket couldn't even be opened),
+-- matching libpq's distinct phrasing for a Unix-domain socket vs. a TCP host.
+connectFailureMessage :: ConnInfo -> IOException -> ByteString
+connectFailureMessage connInfo err
+  | Transport.isUnixSocketHost (host connInfo) =
+      "could not connect to server: "
+        <> ByteString.Char8.pack (show err)
+        <> " (Unix domain socket '"
+        <> ByteString.Char8.pack (Transport.unixSocketPath (host connInfo) (port connInfo))
+        <> "')"
+  | otherwise = "could not connect to server: " <> ByteString.Char8.pack (show err)
+
+-- | The handshake-failure message ('failWith', inside 'handshake') for a
+-- Unix-domain socket connection: names the socket path rather than a
+-- host\/port pair, matching libpq's phrasing.
+unixSocketFailureMessage :: ConnInfo -> ByteString -> ByteString
+unixSocketFailureMessage connInfo fmtFields =
+  "connection to server on socket '"
+    <> ByteString.Char8.pack (Transport.unixSocketPath (host connInfo) (port connInfo))
+    <> "' failed: "
+    <> fmtFields
+
+-- | The handshake-failure message for a TCP connection: includes the
+-- resolved peer IP when available (it may not be, e.g. if the socket has
+-- already been torn down), matching libpq's phrasing.
+tcpFailureMessage :: Connection -> ConnInfo -> ByteString -> IO ByteString
+tcpFailureMessage connection connInfo fmtFields = do
+  transport <- readIORef (transport connection)
+  mIp <- catch (Just <$> Transport.peerIp transport) (\(_ :: SomeException) -> pure Nothing)
+  pure $ case mIp of
+    Nothing -> fmtFields
+    Just ip ->
+      "connection to server at \""
+        <> host connInfo
+        <> "\" ("
+        <> ip
+        <> "), port "
+        <> ByteString.Char8.pack (show (port connInfo))
+        <> " failed: "
+        <> fmtFields
+
 -- | Open a connection: resolve and connect the socket, send the startup
 -- message, and run the authentication\/startup handshake. Like libpq, a failed
 -- connection (whether due to a network error or a rejected handshake) yields a
@@ -305,21 +393,22 @@ setError connection message = do
 -- 'ConnectionBad' connection rather than throwing.
 establish :: ByteString -> IO Connection
 establish conninfo = do
+  dfltHost <- resolveDefaultHost
   userResult <- resolveDefaultUser
   case userResult of
     Left message -> do
       transport <- Transport.unconnected
-      connection <- newConnection False transport (parseConnInfo conninfo "")
+      connection <- newConnection False transport (parseConnInfo conninfo "" dfltHost)
       setError connection (ByteString.Char8.pack message)
       pure connection
     Right dfltUser -> do
-      let info = parseConnInfo conninfo dfltUser
+      let info = parseConnInfo conninfo dfltUser dfltHost
       transportResult <- try @IOException (Transport.connect (host info) (port info))
       case transportResult of
         Left err -> do
           transport <- Transport.unconnected
           connection <- newConnection False transport info
-          setError connection ("could not connect to server: " <> ByteString.Char8.pack (show err))
+          setError connection (connectFailureMessage info err)
           pure connection
         Right transport -> do
           connection <- newConnection False transport info
@@ -332,7 +421,7 @@ establish conninfo = do
 nullConnection :: IO Connection
 nullConnection = do
   transport <- Transport.unconnected
-  let info = parseConnInfo "" ""
+  let info = parseConnInfo "" "" "localhost"
   conn <- newConnection True transport info
   writeIORef (lastError conn) (Just "connection pointer is NULL\n")
   pure conn
@@ -418,19 +507,12 @@ handshake connection = authenticating
         _ -> startingUp
     failWith fields = do
       let fmtFields = formatErrorFields (Map.fromList fields)
-      transport <- readIORef (transport connection)
-      mIp <- catch (Just <$> Transport.peerIp transport) (\(_ :: SomeException) -> pure Nothing)
-      setError connection $ case mIp of
-        Nothing -> fmtFields
-        Just ip ->
-          "connection to server at \""
-            <> host (info connection)
-            <> "\" ("
-            <> ip
-            <> "), port "
-            <> ByteString.Char8.pack (show (port (info connection)))
-            <> " failed: "
-            <> fmtFields
+          connInfo = info connection
+      message <-
+        if Transport.isUnixSocketHost (host connInfo)
+          then pure (unixSocketFailureMessage connInfo fmtFields)
+          else tcpFailureMessage connection connInfo fmtFields
+      setError connection message
 
 -- | The SASL message round-trip used by 'Auth.scram': send a client message and
 -- receive the next server SASL\/auth message, projected to the bytes the SCRAM

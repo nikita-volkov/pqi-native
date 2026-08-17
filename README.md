@@ -53,3 +53,9 @@ for the motivation and the tradeoffs of adopting it at this stage.
 Authentication: **trust**, **MD5**, and **SCRAM-SHA-256** are implemented. SCRAM
 is verified against a password-auth PostgreSQL 17 container (which defaults to
 `scram-sha-256`).
+
+Transport: plain TCP and Unix-domain sockets. A `host` value that's an
+absolute path names a socket directory instead of a TCP host, and omitting
+`host` altogether defaults the way libpq itself does: `PGHOST` if set,
+otherwise a Unix-domain socket in `/tmp` on Unix-like systems, or `localhost`
+on Windows.
