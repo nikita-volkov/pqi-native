@@ -32,6 +32,7 @@ import Pqi.Native.Transport.Message
 import Pqi.Native.Types (formatErrorFields)
 import qualified PtrPoker.Write as Poker
 import System.Environment (lookupEnv)
+import System.IO.Error (isEOFError)
 #if defined(mingw32_HOST_OS)
 import System.Win32.Info.Computer (getUserName)
 #else
@@ -366,6 +367,25 @@ connectFailureMessage connInfo err
         <> "')"
   | otherwise = "could not connect to server: " <> ByteString.Char8.pack (show err)
 
+-- | Format a handshake-time 'IOException' - e.g. the server closing the
+-- socket mid-rejection, as when shedding load with \"sorry, too many clients
+-- already\": the rejection is sent but the socket closes before 'handshake'
+-- finishes reading it. Routed through the same 'unixSocketFailureMessage'\/
+-- 'tcpFailureMessage' wrapper 'failWith' uses for a rejected 'ErrorResponse',
+-- so a failure that interrupts the handshake reads exactly like any other
+-- classified rejection instead of escaping 'establish' as an uncaught
+-- exception. An EOF (the frame never completing) gets libpq's own wording for
+-- it; any other handshake-time I\/O error falls back to its 'show'n form.
+handshakeFailureMessage :: Connection -> ConnInfo -> IOException -> IO ByteString
+handshakeFailureMessage connection connInfo err = do
+  let fmtFields
+        | isEOFError err =
+            "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n"
+        | otherwise = ByteString.Char8.pack (show err)
+  if Transport.isUnixSocketHost (host connInfo)
+    then pure (unixSocketFailureMessage connInfo fmtFields)
+    else tcpFailureMessage connection connInfo fmtFields
+
 -- | The handshake-failure message ('failWith', inside 'handshake') for a
 -- Unix-domain socket connection: names the socket path rather than a
 -- host\/port pair, matching libpq's phrasing.
@@ -377,20 +397,30 @@ unixSocketFailureMessage connInfo fmtFields =
     <> fmtFields
 
 -- | The handshake-failure message for a TCP connection: includes the
--- resolved peer IP when available (it may not be, e.g. if the socket has
--- already been torn down), matching libpq's phrasing.
+-- resolved peer IP when available and distinct from the given host (it may
+-- not be resolvable at all, e.g. if the socket has already been torn down;
+-- and libpq omits the parenthetical entirely when the host was already the
+-- literal numeric address, rather than a name that resolved to it), matching
+-- libpq's phrasing.
 tcpFailureMessage :: Connection -> ConnInfo -> ByteString -> IO ByteString
 tcpFailureMessage connection connInfo fmtFields = do
   transport <- readIORef (transport connection)
   mIp <- catch (Just <$> Transport.peerIp transport) (\(_ :: SomeException) -> pure Nothing)
   pure $ case mIp of
-    Nothing -> fmtFields
-    Just ip ->
+    Just ip
+      | ip /= host connInfo ->
+          "connection to server at \""
+            <> host connInfo
+            <> "\" ("
+            <> ip
+            <> "), port "
+            <> ByteString.Char8.pack (show (port connInfo))
+            <> " failed: "
+            <> fmtFields
+    _ ->
       "connection to server at \""
         <> host connInfo
-        <> "\" ("
-        <> ip
-        <> "), port "
+        <> "\", port "
         <> ByteString.Char8.pack (show (port connInfo))
         <> " failed: "
         <> fmtFields
@@ -426,7 +456,10 @@ establish conninfo = do
         Right transport -> do
           connection <- newConnection False transport info
           sendMessage connection (startupMessage (startupParams info))
-          handshake connection
+          handshakeResult <- try @IOException (handshake connection)
+          case handshakeResult of
+            Left err -> setError connection =<< handshakeFailureMessage connection info err
+            Right () -> pure ()
           pure connection
 
 -- | A \"null\" sentinel connection (the analogue of @PQnewNullConnection@): no
