@@ -104,8 +104,8 @@ send transport write = Socket.ByteString.sendAll (socket transport) (Poker.toByt
 -- as needed. Throws on EOF before @n@ bytes are available.
 --
 -- The wait for bytes is deliberately left interruptible. Nothing has been
--- consumed at this point, so a caller that gives up here loses nothing - and,
--- crucially, is /able/ to give up. A caller blocked on a message the server
+-- consumed at this point, so a caller that gives up here loses nothing - and
+-- is /able/ to give up. A caller blocked on a message the server
 -- will never send (an aborted pipeline whose bookkeeping has drifted, say)
 -- must stay abandonable by 'System.Timeout.timeout'; masking the wait
 -- uninterruptibly turns that stall into a deadlock no timer can break.
