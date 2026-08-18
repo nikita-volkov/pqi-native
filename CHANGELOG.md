@@ -1,3 +1,13 @@
+# v1.0.1.9
+
+## Fixes
+
+- Fixed a DNS resolution failure during `connectdb` reporting the raw `Show`n `Network.Socket.getAddrInfo` exception (e.g. `could not connect to server: Network.Socket.getAddrInfo (called with preferred socket type/protocol: ...): does not exist (nodename nor servname provided, or not known)`) instead of libpq's own sentence for it (`could not translate host name "..." to address: nodename nor servname provided, or not known`). `connectFailureMessage` now recognizes a resolver failure by `Network.Socket.getAddrInfo` naming itself in the exception's `ioe_location`, and reproduces libpq's wording using the exception's `ioe_description`. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.Connectdb.UnresolvableHost`.
+
+- Fixed a handshake-time hard TCP reset (`ECONNRESET`, as opposed to a clean EOF) reporting the raw `Show`n `IOException` (e.g. `Network.Socket.recvBuf: resource vanished (Connection reset by peer)`) instead of libpq's own "server closed the connection unexpectedly" sentence, which it uses for both a reset and a clean EOF alike. `handshakeFailureMessage`'s classification (`isConnectionLost`, factored out as `connectionLostMessage`) now also recognizes a reset - `Network.Socket` surfaces `ECONNRESET` as `ioe_type == ResourceVanished` rather than `System.IO.Error.eofErrorType` - not just a clean EOF. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.Connectdb.HandshakeReset`.
+
+- Fixed a connection reset while a query response was in flight escaping `Pqi.exec`/`execParams`/`prepare`/`execPrepared`/`describePrepared`/`describePortal` as a raw, uncaught `IOException` instead of coming back as a classified `FatalError` result the way libpq's `PQexec` does (a lost connection mid-query never throws there; it reports a result with `FatalError` status and the same "server closed the connection unexpectedly" wording used for a handshake-time loss). Each of those six flows now catches an `IOException` escaping its read loop and reports it through the same `connectionLostMessage` classification, also marking the connection `ConnectionBad`. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.Exec.ConnectionLostMidQuery`. Found via `hasql` issue #329.
+
 # v1.0.1.8
 
 ## Fixes

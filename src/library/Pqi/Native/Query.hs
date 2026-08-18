@@ -17,7 +17,7 @@ module Pqi.Native.Query
   )
 where
 
-import Control.Exception (mask_)
+import Control.Exception (IOException, catch, mask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Pqi (ConnStatus (..), ExecStatus (..), Format (..), PipelineStatus (..))
@@ -78,7 +78,7 @@ tooManyParams = (> maxParamCount) . length
 exec :: Connection -> ByteString -> IO (Maybe NativeResult)
 exec connection sql = withReady connection do
   sendMessage connection (queryMessage sql)
-  lastMaybe <$> collectSimple connection sql
+  catch (lastMaybe <$> collectSimple connection sql) (fmap Just . connectionLostResult connection sql)
 
 -- | Parameterized query via the extended protocol.
 execParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO (Maybe NativeResult)
@@ -86,7 +86,7 @@ execParams connection sql params resultFormat
   | tooManyParams params = pure Nothing
   | otherwise = withReady connection do
       sendMessage connection (paramsWrite sql params resultFormat)
-      Just <$> collectExtended connection sql
+      catch (Just <$> collectExtended connection sql) (fmap Just . connectionLostResult connection sql)
 
 -- | Prepare a named statement.
 prepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO (Maybe NativeResult)
@@ -94,7 +94,7 @@ prepare connection name sql parameterTypes
   | maybe False tooManyParams parameterTypes = pure Nothing
   | otherwise = withReady connection do
       sendMessage connection (prepareWrite name sql parameterTypes)
-      Just <$> collectExtended connection sql
+      catch (Just <$> collectExtended connection sql) (fmap Just . connectionLostResult connection sql)
 
 -- | Execute a previously prepared statement.
 execPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO (Maybe NativeResult)
@@ -102,7 +102,7 @@ execPrepared connection name params resultFormat
   | tooManyParams params = pure Nothing
   | otherwise = withReady connection do
       sendMessage connection (preparedWrite name params resultFormat)
-      Just <$> collectExtended connection ""
+      catch (Just <$> collectExtended connection "") (fmap Just . connectionLostResult connection "")
 
 -- * Asynchronous flows
 
@@ -381,13 +381,13 @@ popPendingParseOrigin connection =
 describePrepared :: Connection -> ByteString -> IO (Maybe NativeResult)
 describePrepared connection name = withReady connection do
   sendMessage connection (describeStatementMessage name <> syncMessage)
-  Just <$> collectExtended connection ""
+  catch (Just <$> collectExtended connection "") (fmap Just . connectionLostResult connection "")
 
 -- | Describe a portal.
 describePortal :: Connection -> ByteString -> IO (Maybe NativeResult)
 describePortal connection name = withReady connection do
   sendMessage connection (describePortalMessage name <> syncMessage)
-  Just <$> collectExtended connection ""
+  catch (Just <$> collectExtended connection "") (fmap Just . connectionLostResult connection "")
 
 -- * Parameter projections
 
@@ -423,6 +423,18 @@ withReady connection action = do
   case status of
     ConnectionOk -> action
     _ -> pure Nothing
+
+-- | Turn a read loop's escaped 'IOException' - e.g. a connection reset while
+-- a result is still in flight - into a classified 'FatalError' result,
+-- matching @PQexec@: libpq never throws here, it reports the same
+-- "server closed the connection unexpectedly" wording it uses for a
+-- handshake-time loss (see 'connectionLostMessage'), and marks the
+-- connection bad so the caller's next call sees it too.
+connectionLostResult :: Connection -> ByteString -> IOException -> IO NativeResult
+connectionLostResult connection sql err = do
+  let message = connectionLostMessage err
+  setError connection (message <> "\n")
+  pure (NativeResult FatalError [] [] Nothing (Map.singleton 0x4d message) [] sql)
 
 -- accumulator for a result under construction
 data Builder = Builder

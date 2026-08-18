@@ -14,16 +14,18 @@ module Pqi.Native.Connection
     sendMessage,
     fieldValue,
     setError,
+    connectionLostMessage,
   )
 where
 
 import Control.Exception (IOException, SomeException, catch, try)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import GHC.IO.Exception (ioe_description)
+import GHC.IO.Exception (IOErrorType (ResourceVanished), ioe_description, ioe_location, ioe_type)
 import Pqi (ConnStatus (..), Notify (..), PipelineStatus (..), Verbosity (..))
 import qualified Pqi.Native.Auth as Auth
 import Pqi.Native.Prelude
@@ -357,7 +359,8 @@ setError connection message = do
   writeIORef (connStatus connection) ConnectionBad
 
 -- | Format an initial-connect failure (the socket couldn't even be opened),
--- matching libpq's distinct phrasing for a Unix-domain socket vs. a TCP host.
+-- matching libpq's distinct phrasing for a Unix-domain socket, a DNS
+-- resolution failure, and any other TCP connect failure.
 connectFailureMessage :: ConnInfo -> IOException -> ByteString
 connectFailureMessage connInfo err
   | Transport.isUnixSocketHost (host connInfo) =
@@ -366,6 +369,17 @@ connectFailureMessage connInfo err
         ( ByteString.Char8.pack (ioe_description err)
             <> "\n\tIs the server running locally and accepting connections on that socket?\n"
         )
+  -- 'Network.Socket.getAddrInfo' names itself in 'ioe_location' on failure
+  -- (there is no other reliable way to tell a resolver failure apart from a
+  -- 'Network.Socket.connect' failure once both have collapsed to a plain
+  -- 'IOException'), and libpq has its own distinct sentence for this case
+  -- rather than the generic "could not connect to server".
+  | "getAddrInfo" `isInfixOf` ioe_location err =
+      "could not translate host name \""
+        <> host connInfo
+        <> "\" to address: "
+        <> ByteString.Char8.pack (ioe_description err)
+        <> "\n"
   | otherwise = "could not connect to server: " <> ByteString.Char8.pack (show err)
 
 -- | Format a handshake-time 'IOException' - e.g. the server closing the
@@ -375,17 +389,37 @@ connectFailureMessage connInfo err
 -- 'tcpFailureMessage' wrapper 'failWith' uses for a rejected 'ErrorResponse',
 -- so a failure that interrupts the handshake reads exactly like any other
 -- classified rejection instead of escaping 'establish' as an uncaught
--- exception. An EOF (the frame never completing) gets libpq's own wording for
--- it; any other handshake-time I\/O error falls back to its 'show'n form.
+-- exception. A connection lost outright - a clean EOF or a hard TCP reset -
+-- gets libpq's own wording for it (see 'connectionLostMessage'); any other
+-- handshake-time I\/O error falls back to its 'show'n form.
 handshakeFailureMessage :: Connection -> ConnInfo -> IOException -> IO ByteString
 handshakeFailureMessage connection connInfo err = do
   let fmtFields
-        | isEOFError err =
-            "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n"
-        | otherwise = ByteString.Char8.pack (show err)
+        | isConnectionLost err = connectionLostMessage err <> "\n"
+        | otherwise = connectionLostMessage err
   if Transport.isUnixSocketHost (host connInfo)
     then pure (unixSocketFailureMessage connInfo fmtFields)
     else tcpFailureMessage connection connInfo fmtFields
+
+-- | Whether an 'IOException' represents the connection being lost outright -
+-- a clean EOF (the frame never completing) or a hard TCP reset
+-- (@ECONNRESET@, which 'Network.Socket' surfaces as 'ResourceVanished'
+-- rather than 'System.IO.Error.eofErrorType') - as opposed to some other kind
+-- of I\/O failure.
+isConnectionLost :: IOException -> Bool
+isConnectionLost err = isEOFError err || ioe_type err == ResourceVanished
+
+-- | libpq's own wording for a connection lost outright (see
+-- 'isConnectionLost'), without a trailing newline - callers that embed this
+-- inline (e.g. 'handshakeFailureMessage') append one themselves; the one that
+-- folds it into a result's error fields ('Pqi.Native.Query') gets its
+-- trailing newline for free from 'Pqi.Native.Types.formatResultError'. Falls
+-- back to the exception's 'show'n form for anything else.
+connectionLostMessage :: IOException -> ByteString
+connectionLostMessage err
+  | isConnectionLost err =
+      "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request."
+  | otherwise = ByteString.Char8.pack (show err)
 
 -- | The handshake-failure message ('failWith', inside 'handshake') for a
 -- Unix-domain socket connection: names the socket path rather than a

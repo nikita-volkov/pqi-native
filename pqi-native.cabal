@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: pqi-native
-version: 1.0.1.8
+version: 1.0.1.9
 category: Database, PostgreSQL
 synopsis: Native (pure-Haskell) adapter for pqi
 description:
@@ -158,5 +158,5 @@ test-suite native-test
   build-depends:
     base >=4.11 && <5,
     hspec >=2.11 && <2.12,
-    pqi-conformance ^>=1.0.8,
+    pqi-conformance ^>=1.0.9,
     pqi-native,
