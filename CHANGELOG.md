@@ -1,3 +1,9 @@
+# v1.0.1.8
+
+## Fixes
+
+- Fixed `connectFailureMessage` (used when the initial `connect(2)` fails, e.g. a missing Unix-socket directory) hand-rolling a TCP-shaped message with a `(Unix domain socket '<path>')` parenthetical appended, instead of reusing `unixSocketFailureMessage`. That hand-rolled text retained the literal prefix `"could not connect to server: "`, which is also the substring `Hasql.Connection`'s error classifier matches to identify a transient networking failure - so a permanent misconfiguration (missing socket directory) was misclassified as transient. The Unix-socket branch now delegates to `unixSocketFailureMessage`, matching the phrasing already used for the equivalent handshake-time failure. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.Connectdb.MissingUnixSocketDirectory`. Found via `hasql` issue #329.
+
 # v1.0.1.7
 
 ## Fixes

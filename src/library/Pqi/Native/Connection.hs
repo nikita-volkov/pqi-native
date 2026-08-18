@@ -360,11 +360,7 @@ setError connection message = do
 connectFailureMessage :: ConnInfo -> IOException -> ByteString
 connectFailureMessage connInfo err
   | Transport.isUnixSocketHost (host connInfo) =
-      "could not connect to server: "
-        <> ByteString.Char8.pack (show err)
-        <> " (Unix domain socket '"
-        <> ByteString.Char8.pack (Transport.unixSocketPath (host connInfo) (port connInfo))
-        <> "')"
+      unixSocketFailureMessage connInfo (ByteString.Char8.pack (show err))
   | otherwise = "could not connect to server: " <> ByteString.Char8.pack (show err)
 
 -- | Format a handshake-time 'IOException' - e.g. the server closing the
