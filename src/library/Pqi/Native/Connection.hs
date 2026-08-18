@@ -23,6 +23,7 @@ import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
+import GHC.IO.Exception (ioe_description)
 import Pqi (ConnStatus (..), Notify (..), PipelineStatus (..), Verbosity (..))
 import qualified Pqi.Native.Auth as Auth
 import Pqi.Native.Prelude
@@ -360,7 +361,11 @@ setError connection message = do
 connectFailureMessage :: ConnInfo -> IOException -> ByteString
 connectFailureMessage connInfo err
   | Transport.isUnixSocketHost (host connInfo) =
-      unixSocketFailureMessage connInfo (ByteString.Char8.pack (show err))
+      unixSocketFailureMessage
+        connInfo
+        ( ByteString.Char8.pack (ioe_description err)
+            <> "\n\tIs the server running locally and accepting connections on that socket?\n"
+        )
   | otherwise = "could not connect to server: " <> ByteString.Char8.pack (show err)
 
 -- | Format a handshake-time 'IOException' - e.g. the server closing the
@@ -387,9 +392,9 @@ handshakeFailureMessage connection connInfo err = do
 -- host\/port pair, matching libpq's phrasing.
 unixSocketFailureMessage :: ConnInfo -> ByteString -> ByteString
 unixSocketFailureMessage connInfo fmtFields =
-  "connection to server on socket '"
+  "connection to server on socket \""
     <> ByteString.Char8.pack (Transport.unixSocketPath (host connInfo) (port connInfo))
-    <> "' failed: "
+    <> "\" failed: "
     <> fmtFields
 
 -- | The handshake-failure message for a TCP connection: includes the
