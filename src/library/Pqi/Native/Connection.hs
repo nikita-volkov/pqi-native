@@ -231,15 +231,15 @@ parseUri dfltUser dfltHost withoutScheme =
             Just close ->
               let h = ByteString.take close (ByteString.drop 1 hostport)
                   portStr = ByteString.drop 2 (ByteString.drop close hostport)
-               in (h, readPort portStr)
-            Nothing -> (hostport, 5432)
+               in (pctDecode h, readPort portStr)
+            Nothing -> (pctDecode hostport, 5432)
       | otherwise = case ByteString.elemIndexEnd 0x3a hostport of
           Just c ->
             let h = ByteString.take c hostport
                 p = ByteString.drop (c + 1) hostport
-             in if ByteString.null h then (dfltHost, readPort p) else (h, readPort p)
+             in if ByteString.null h then (dfltHost, readPort p) else (pctDecode h, readPort p)
           Nothing ->
-            (defaultIfEmpty dfltHost hostport, 5432)
+            (defaultIfEmpty dfltHost (pctDecode hostport), 5432)
 
     readPort bs = maybe 5432 fst (ByteString.Char8.readInt bs)
 

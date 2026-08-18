@@ -1,3 +1,9 @@
+# v1.0.1.7
+
+## Fixes
+
+- Fixed a `postgresql://` URI conninfo with a percent-encoded Unix-socket host (e.g. `%2ftmp%2f...`) being passed through to `host` still percent-encoded instead of decoded. `parseUri`'s `host`/`port` splitter decoded every other URI component (`user`, `password`, `dbname`, query params) but forwarded the raw, undecoded host bytes. Caught by the `pqi-conformance` differential spec `Pqi.Conformance.Operation.Connectdb.UnixSocketUri`.
+
 # v1.0.1.6
 
 ## Fixes
