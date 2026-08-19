@@ -9,6 +9,7 @@ module Pqi.Native
   )
 where
 
+import Control.Exception (IOException, catch)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.Map.Strict as Map
@@ -144,12 +145,23 @@ mkConnection connection =
         if pending
           then pure False
           else writeIORef (Connection.pipelineStatus connection) Pqi.PipelineOff $> True,
-      Pqi.pipelineSync = do
-        Connection.sendMessage connection syncMessage
-        modifyIORef' (Connection.pendingSyncs connection) (+ 1)
-        writeIORef (Connection.asyncPending connection) True
-        pure True,
-      Pqi.sendFlushRequest = Connection.sendMessage connection flushMessage $> True,
+      -- Both of these send directly, bypassing 'Query.sendAsync' (there is no
+      -- result-bearing command to track), so they need their own escape
+      -- hatch for the same class of failure 'Query.sendAsync' guards
+      -- against: a socket death mid-send throwing instead of the @False@
+      -- @PQpipelineSync@\/@PQsendFlushRequest@ return on a fatal send.
+      Pqi.pipelineSync =
+        catch
+          do
+            Connection.sendMessage connection syncMessage
+            modifyIORef' (Connection.pendingSyncs connection) (+ 1)
+            writeIORef (Connection.asyncPending connection) True
+            pure True
+          (\err -> False <$ Connection.markConnectionLost connection err),
+      Pqi.sendFlushRequest =
+        catch
+          (Connection.sendMessage connection flushMessage $> True)
+          (\err -> False <$ Connection.markConnectionLost connection err),
       Pqi.getCancel = do
         key <- readIORef (Connection.backendKey connection)
         pure

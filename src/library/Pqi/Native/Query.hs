@@ -77,47 +77,64 @@ tooManyParams = (> maxParamCount) . length
 -- | Simple query. Returns the last result, mirroring @PQexec@.
 exec :: Connection -> ByteString -> IO (Maybe NativeResult)
 exec connection sql = withReady connection do
-  sendMessage connection (queryMessage sql)
-  catch (lastMaybe <$> collectSimple connection sql) (fmap Just . connectionLostResult connection sql)
+  catch
+    (sendMessage connection (queryMessage sql) >> (lastMaybe <$> collectSimple connection sql))
+    (fmap Just . connectionLostResult connection sql)
 
 -- | Parameterized query via the extended protocol.
 execParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO (Maybe NativeResult)
 execParams connection sql params resultFormat
   | tooManyParams params = pure Nothing
   | otherwise = withReady connection do
-      sendMessage connection (paramsWrite sql params resultFormat)
-      catch (Just <$> collectExtended connection sql) (fmap Just . connectionLostResult connection sql)
+      catch
+        (sendMessage connection (paramsWrite sql params resultFormat) >> (Just <$> collectExtended connection sql))
+        (fmap Just . connectionLostResult connection sql)
 
 -- | Prepare a named statement.
 prepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO (Maybe NativeResult)
 prepare connection name sql parameterTypes
   | maybe False tooManyParams parameterTypes = pure Nothing
   | otherwise = withReady connection do
-      sendMessage connection (prepareWrite name sql parameterTypes)
-      catch (Just <$> collectExtended connection sql) (fmap Just . connectionLostResult connection sql)
+      catch
+        (sendMessage connection (prepareWrite name sql parameterTypes) >> (Just <$> collectExtended connection sql))
+        (fmap Just . connectionLostResult connection sql)
 
 -- | Execute a previously prepared statement.
 execPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO (Maybe NativeResult)
 execPrepared connection name params resultFormat
   | tooManyParams params = pure Nothing
   | otherwise = withReady connection do
-      sendMessage connection (preparedWrite name params resultFormat)
-      catch (Just <$> collectExtended connection "") (fmap Just . connectionLostResult connection "")
+      catch
+        (sendMessage connection (preparedWrite name params resultFormat) >> (Just <$> collectExtended connection ""))
+        (fmap Just . connectionLostResult connection "")
 
 -- * Asynchronous flows
 
 -- | Send a write in async mode, tracking pending commands for pipeline abort.
+--
+-- A socket death mid-send (e.g. @EPIPE@\/@ECONNRESET@) surfaces here as an
+-- escaped 'IOException' from 'Transport.send', which 'sendMessage' does not
+-- catch. Left uncaught, it would blow straight through this function - and
+-- every caller layered on it ('Pqi.Native.sendQuery' etc., 'Hasql.Comms.Send')
+-- - as a raw exception instead of the @False@ that @PQsendQuery@ always
+-- returns for a fatal send. Catching it here and marking the connection bad
+-- keeps the contract: the caller sees a normal failed send, discoverable via
+-- 'Pqi.status', exactly as libpq's own internals never throw and always
+-- record the failure on the connection instead.
 sendAsync :: Connection -> ByteString -> Poker.Write -> IO Bool
 sendAsync connection sql write = do
   status <- readIORef (connStatus connection)
   case status of
-    ConnectionOk -> do
-      sendMessage connection write
-      writeIORef (currentQuery connection) sql
-      writeIORef (asyncPending connection) True
-      pipeStatus <- readIORef (pipelineStatus connection)
-      when (pipeStatus /= PipelineOff) $ modifyIORef' (pendingCommands connection) (+ 1)
-      pure True
+    ConnectionOk ->
+      catch
+        do
+          sendMessage connection write
+          writeIORef (currentQuery connection) sql
+          writeIORef (asyncPending connection) True
+          pipeStatus <- readIORef (pipelineStatus connection)
+          when (pipeStatus /= PipelineOff) $ modifyIORef' (pendingCommands connection) (+ 1)
+          pure True
+        (\err -> False <$ markConnectionLost connection err)
     _ -> pure False
 
 -- | Whether the connection is in pipeline mode.
@@ -432,8 +449,7 @@ withReady connection action = do
 -- connection bad so the caller's next call sees it too.
 connectionLostResult :: Connection -> ByteString -> IOException -> IO NativeResult
 connectionLostResult connection sql err = do
-  let message = connectionLostMessage err
-  setError connection (message <> "\n")
+  message <- markConnectionLost connection err
   pure (NativeResult FatalError [] [] Nothing (Map.singleton 0x4d message) [] sql)
 
 -- accumulator for a result under construction

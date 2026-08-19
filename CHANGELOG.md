@@ -1,3 +1,9 @@
+# v1.0.1.10
+
+## Fixes
+
+- Fixed a socket death during a send (e.g. `EPIPE`/`ECONNRESET`) escaping `Pqi.sendQuery`/`sendQueryParams`/`sendPrepare`/`sendQueryPrepared`/`sendDescribePrepared`/`sendDescribePortal` as a raw, uncaught `IOException` instead of the `False` libpq's `PQsendQuery` and friends always return for a fatal send (marking `PQstatus` `CONNECTION_BAD` and leaving `PQerrorMessage` with the same "server closed the connection unexpectedly" wording used for a connection lost while reading). `Pqi.Native.Transport.send` is `Network.Socket.ByteString.sendAll`, which throws rather than reporting failure through a return value, and `sendAsync` - the function every one of those six calls funnels through - called it with no exception handler at all. This is also the entry point `hasql`'s `Session` machinery actually exercises for every ordinary (non-pipelined) statement, so the escaped exception used to reach `Hasql.Connection.use`'s interruption handling and get treated as an async interruption instead of a classified send failure. `sendAsync` now catches an escaped `IOException`, marks the connection bad via the same `markConnectionLost` classification the read side already had, and returns `False`. The sibling direct sends in `pipelineSync`/`sendFlushRequest` (which bypass `sendAsync` entirely) get the same treatment. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.SendQuery.ConnectionLostBeforeSend`.
+
 # v1.0.1.9
 
 ## Fixes

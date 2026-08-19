@@ -15,6 +15,7 @@ module Pqi.Native.Connection
     fieldValue,
     setError,
     connectionLostMessage,
+    markConnectionLost,
   )
 where
 
@@ -420,6 +421,17 @@ connectionLostMessage err
   | isConnectionLost err =
       "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request."
   | otherwise = ByteString.Char8.pack (show err)
+
+-- | Record an escaped 'IOException' from the transport - a send or a read,
+-- at any point in a flow - the way libpq's own internals do: never throw,
+-- just mark the connection bad with the classified message ('connectionLostMessage'),
+-- so every subsequent call - starting with the one already in flight - sees
+-- it via 'Pqi.status'\/'Pqi.errorMessage'.
+markConnectionLost :: Connection -> IOException -> IO ByteString
+markConnectionLost connection err = do
+  let message = connectionLostMessage err
+  setError connection (message <> "\n")
+  pure message
 
 -- | The handshake-failure message ('failWith', inside 'handshake') for a
 -- Unix-domain socket connection: names the socket path rather than a
