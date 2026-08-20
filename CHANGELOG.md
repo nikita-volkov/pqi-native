@@ -1,3 +1,9 @@
+# v1.0.1.11
+
+## Fixes
+
+- Fixed `Pqi.connectionNeedsPassword` and `Pqi.connectionUsedPassword` tracking the conninfo `password=` field instead of libpq's `password_needed` auth-exchange state. `connectionNeedsPassword` was hardcoded `pure False`; `connectionUsedPassword` was `not (ByteString.null password)`, so it reported `True` whenever a password string was merely present in the conninfo, trust auth or not, and `connectionNeedsPassword` never reported `True` even when SCRAM authentication was challenged for and no password was supplied. `Pqi.Native.Connection.Connection` now carries a `passwordNeeded` flag, set during the handshake only when the server actually sends `AuthenticationCleartextPassword`/`MD5Password`/`SASL`, and reset on `reconnect`; both functions now derive from that state, matching `fe-auth.c`'s `password_needed` semantics exactly. Caught by the `pqi-conformance` specs `Pqi.Conformance.Operation.ConnectionNeedsPassword` and `Pqi.Conformance.Operation.ConnectionUsedPassword`.
+
 # v1.0.1.10
 
 ## Fixes

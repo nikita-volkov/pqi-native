@@ -101,8 +101,10 @@ mkConnection connection =
         fd <- Transport.socketFd transport
         pure (Just (fromIntegral fd :: Fd)),
       Pqi.backendPID = maybe 0 fst <$> readIORef (Connection.backendKey connection),
-      Pqi.connectionNeedsPassword = pure False,
-      Pqi.connectionUsedPassword = pure (not (ByteString.null (Connection.password (Connection.info connection)))),
+      Pqi.connectionNeedsPassword = do
+        needed <- readIORef (Connection.passwordNeeded connection)
+        pure (needed && ByteString.null (Connection.password (Connection.info connection))),
+      Pqi.connectionUsedPassword = readIORef (Connection.passwordNeeded connection),
       Pqi.exec = \sql -> fmap mkResult <$> Query.exec connection sql,
       Pqi.execParams = \sql params resultFormat ->
         fmap mkResult <$> Query.execParams connection sql params resultFormat,

@@ -314,7 +314,13 @@ data Connection = Connection
     -- | The SQL text of the most recently sent query (set by sendQuery /
     -- sendQueryParams). Used when formatting error messages for async results
     -- so that @LINE N:@ position context can be reproduced.
-    currentQuery :: IORef ByteString
+    currentQuery :: IORef ByteString,
+    -- | Set during the handshake when the server actually challenges for a
+    -- password (@AuthenticationCleartextPassword@\/@MD5Password@\/@SASL@),
+    -- mirroring libpq's @password_needed@. Trust\/peer\/GSS authentication
+    -- never sets this, regardless of whether a password was supplied in the
+    -- conninfo.
+    passwordNeeded :: IORef Bool
   }
 
 -- | Send a serialized frontend message.
@@ -532,6 +538,7 @@ reconnect connection = do
   writeIORef (txStatus connection) 0x49
   writeIORef (connStatus connection) ConnectionBad
   writeIORef (lastError connection) (Just "")
+  writeIORef (passwordNeeded connection) False
   sendMessage connection (startupMessage (startupParams (info connection)))
   handshake connection
 
@@ -564,6 +571,7 @@ newConnection isNull transport info = do
     <*> newIORef Seq.empty
     <*> newIORef ErrorsDefault
     <*> newIORef ""
+    <*> newIORef False
 
 -- | The startup\/authentication state machine, ending at the first
 -- @ReadyForQuery@ (success) or @ErrorResponse@ (failure).
@@ -575,13 +583,16 @@ handshake connection = authenticating
       case message of
         AuthenticationOk -> startingUp
         AuthenticationCleartextPassword -> do
+          writeIORef (passwordNeeded connection) True
           sendMessage connection (passwordMessage (password (info connection)))
           authenticating
         AuthenticationMD5Password salt -> do
+          writeIORef (passwordNeeded connection) True
           let response = Auth.md5Password (user (info connection)) (password (info connection)) salt
           sendMessage connection (passwordMessage response)
           authenticating
-        AuthenticationSASL mechanisms ->
+        AuthenticationSASL mechanisms -> do
+          writeIORef (passwordNeeded connection) True
           Auth.scram (user (info connection)) (password (info connection)) mechanisms (saslExchange connection) >>= \case
             Left problem -> setError connection problem
             Right () -> startingUp
