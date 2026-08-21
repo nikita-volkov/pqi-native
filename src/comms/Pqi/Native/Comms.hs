@@ -18,6 +18,7 @@ module Pqi.Native.Comms
     cstring,
     bytes,
     remaining,
+    lengthPrefixedBytes,
 
     -- * Serializable primitives
     CString (..),
@@ -95,6 +96,20 @@ bytes n = liftFixed (Peeker.byteArrayAsByteString n)
 -- | All remaining bytes of the body.
 remaining :: Decoder ByteString
 remaining = liftVariable Peeker.remainderAsByteString
+
+-- | An @Int32@-length-prefixed byte string, with a negative length meaning
+-- \"absent\" (the wire protocol's encoding for SQL @NULL@ column values).
+--
+-- Decoded as a single 'liftVariable' call rather than a separate 'int32'
+-- (length) lift followed by a 'bytes' lift: this is the per-column-value
+-- decoder, called for every cell of every row, so halving the lift count
+-- here has an outsized effect on hot-path allocation.
+lengthPrefixedBytes :: Decoder (Maybe ByteString)
+lengthPrefixedBytes = liftVariable $ do
+  len <- Peeker.fixed Peeker.beSignedInt4
+  if len < 0
+    then pure Nothing
+    else Just <$> Peeker.fixed (Peeker.byteArrayAsByteString (fromIntegral len))
 
 -- | A null-terminated string, as a 'Comms' building block.
 newtype CString = CString ByteString

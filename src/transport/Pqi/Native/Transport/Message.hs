@@ -267,11 +267,7 @@ fieldDescription = do
     <*> Peeker.beSignedInt2
 
 columnValue :: Decoder (Maybe ByteString)
-columnValue = do
-  len <- int32
-  if len < 0
-    then pure Nothing
-    else Just <$> bytes (fromIntegral len)
+columnValue = lengthPrefixedBytes
 
 -- | The fields of an @ErrorResponse@\/@NoticeResponse@: @(code, value)@ pairs,
 -- terminated by a zero code byte.
