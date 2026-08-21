@@ -35,6 +35,7 @@ where
 import qualified Data.ByteString as ByteString
 import Pqi.Native.Comms
 import Pqi.Native.Transport.Prelude
+import qualified PtrPeeker as Peeker
 import qualified PtrPoker.Write as Poker
 
 -- * Framing helpers
@@ -220,7 +221,7 @@ decodeBackendMessage typeByte body =
   case typeByte of
     0x52 -> runDecoder authentication body
     0x53 -> runDecoder (ParameterStatus <$> cstring <*> cstring) body
-    0x4b -> runDecoder (BackendKeyData <$> int32 <*> int32) body
+    0x4b -> runDecoder (liftFixed (BackendKeyData <$> Peeker.beSignedInt4 <*> Peeker.beSignedInt4)) body
     0x5a -> runDecoder (ReadyForQuery <$> word8) body
     0x54 -> runDecoder (RowDescription <$> repeatedInt16 fieldDescription) body
     0x44 -> runDecoder (DataRow <$> repeatedInt16 columnValue) body
@@ -248,16 +249,22 @@ repeatedInt16 element = do
   count <- int16
   replicateM (fromIntegral count) element
 
+-- | Six consecutive fixed-size fields, composed and lifted once instead of
+-- separately (see 'Pqi.Native.Comms.lengthPrefixedBytes'\'s haddock for why
+-- this matters; here it applies per column of every 'RowDescription').
 fieldDescription :: Decoder FieldDescription
-fieldDescription =
-  FieldDescription
-    <$> cstring
-    <*> word32
-    <*> int16
-    <*> word32
-    <*> int16
-    <*> int32
-    <*> int16
+fieldDescription = do
+  fieldName <- cstring
+  liftFixed
+    $ ( \tableOid_ columnAttributeNumber_ typeOid_ typeSize_ typeModifier_ formatCode_ ->
+          FieldDescription fieldName tableOid_ columnAttributeNumber_ typeOid_ typeSize_ typeModifier_ formatCode_
+      )
+    <$> Peeker.beUnsignedInt4
+    <*> Peeker.beSignedInt2
+    <*> Peeker.beUnsignedInt4
+    <*> Peeker.beSignedInt2
+    <*> Peeker.beSignedInt4
+    <*> Peeker.beSignedInt2
 
 columnValue :: Decoder (Maybe ByteString)
 columnValue = do
