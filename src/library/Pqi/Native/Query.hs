@@ -20,6 +20,7 @@ where
 import Control.Exception (IOException, catch, mask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
+import qualified Data.Vector.Mutable as MVector
 import Pqi (ConnStatus (..), ExecStatus (..), Format (..), PipelineStatus (..))
 import Pqi.Native.Connection
 import Pqi.Native.Prelude
@@ -245,10 +246,11 @@ getNextResult connection = mask_ do
         else do
           singleRow <- readIORef (singleRowMode connection)
           cachedFields <- readIORef (singleRowFields connection)
+          builder <- newBuilder
           let initBuilder =
                 if singleRow && not (null cachedFields)
-                  then emptyBuilder {accFields = cachedFields, accSawRowDescription = True}
-                  else emptyBuilder
+                  then builder {accFields = cachedFields, accSawRowDescription = True}
+                  else builder
           go singleRow initBuilder
   where
     -- Decrement the pending-command counter and set the separator flag when in
@@ -299,7 +301,9 @@ getNextResult connection = mask_ do
             then do
               writeIORef (singleRowFields connection) (accFields builder)
               pure (Just (NativeResult SingleTuple (accFields builder) [values] Nothing Map.empty [] ""))
-            else go singleRow builder {accRevRows = values : (accRevRows builder)}
+            else do
+              pushRow (accRows builder) values
+              go singleRow builder
         ParseComplete -> do
           -- Charge the @ParseComplete@ to the command that produced it by
           -- popping the oldest recorded origin. Only a 'sendPrepare' origin
@@ -332,7 +336,7 @@ getNextResult connection = mask_ do
               writeIORef (lastError connection) (Just "")
               popOriginIfPending pipeStatus builder
               finishCommand pipeStatus
-              pure (Just (commandResult builder (Just tag)))
+              Just <$> commandResult builder (Just tag)
         EmptyQueryResponse -> do
           writeIORef (lastError connection) (Just "")
           popOriginIfPending pipeStatus builder
@@ -357,14 +361,14 @@ getNextResult connection = mask_ do
               writeIORef (lastError connection) (Just (formatResultError sql errMap))
               pure (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
         PortalSuspended ->
-          pure (Just (commandResult builder Nothing))
+          Just <$> commandResult builder Nothing
         ReadyForQuery txState -> do
           writeIORef (txStatus connection) txState
           case pipeStatus of
             PipelineOff -> do
               writeIORef (asyncPending connection) False
               if (accHadResponse builder)
-                then pure (Just (describeResult builder))
+                then Just <$> describeResult builder
                 else pure Nothing
             _ -> do
               writeIORef (pipelineStatus connection) PipelineOn
@@ -452,10 +456,56 @@ connectionLostResult connection sql err = do
   message <- markConnectionLost connection err
   pure (NativeResult FatalError [] [] Nothing (Map.singleton 0x4d message) [] sql)
 
+-- | A growable row buffer, replacing a cons-list-plus-reverse accumulation
+-- with amortized-O(1) appends into a doubling mutable vector. A statement's
+-- rows are pushed one 'DataRow' at a time and can number in the hundreds of
+-- thousands; accumulating them as @row : rows@ and reversing at the end (the
+-- prior representation) keeps two full-length cons-cell spines alive across
+-- the whole statement, which dominates GC copy volume at scale (see
+-- 'hasql-pqi-native-decode-gc-bound' memory). This buffer holds only the
+-- array (which the RTS moves as one contiguous block, unlike a linked list)
+-- until 'freezeRowBuffer' walks it once into the final list.
+data RowBuffer = RowBuffer
+  { rowBufVec :: !(IORef (MVector.IOVector [Maybe ByteString])),
+    rowBufLen :: !(IORef Int)
+  }
+
+newRowBuffer :: IO RowBuffer
+newRowBuffer = do
+  v <- MVector.new 64
+  RowBuffer <$> newIORef v <*> newIORef 0
+
+pushRow :: RowBuffer -> [Maybe ByteString] -> IO ()
+pushRow (RowBuffer vRef lenRef) row = do
+  v <- readIORef vRef
+  len <- readIORef lenRef
+  v' <-
+    if len >= MVector.length v
+      then do
+        grown <- MVector.grow v (MVector.length v)
+        writeIORef vRef grown
+        pure grown
+      else pure v
+  MVector.write v' len row
+  writeIORef lenRef (len + 1)
+
+-- | Walk the buffer back-to-front once, consing onto an accumulator, which
+-- yields the rows in their original order without a separate reverse pass.
+freezeRowBuffer :: RowBuffer -> IO [[Maybe ByteString]]
+freezeRowBuffer (RowBuffer vRef lenRef) = do
+  v <- readIORef vRef
+  len <- readIORef lenRef
+  let go !i acc
+        | i < 0 = pure acc
+        | otherwise = do
+            x <- MVector.read v i
+            go (i - 1) (x : acc)
+  go (len - 1) []
+
 -- accumulator for a result under construction
 data Builder = Builder
   { accFields :: [FieldDescription],
-    accRevRows :: [[Maybe ByteString]],
+    accRows :: RowBuffer,
     accParamOids :: [Word32],
     accSawRowDescription :: Bool,
     accHadResponse :: Bool,
@@ -464,31 +514,41 @@ data Builder = Builder
     accOriginPopped :: Bool
   }
 
-emptyBuilder :: Builder
-emptyBuilder = Builder [] [] [] False False False
+newBuilder :: IO Builder
+newBuilder = do
+  rows <- newRowBuffer
+  pure (Builder [] rows [] False False False)
 
 -- | Collect the (possibly several) results of a simple query, up to
 -- @ReadyForQuery@. The last is what @PQexec@ returns.
 -- @CopyInResponse@ and @CopyOutResponse@ terminate the loop immediately,
 -- returning a synthetic result so the caller can enter the copy sub-protocol.
 collectSimple :: Connection -> ByteString -> IO [NativeResult]
-collectSimple connection sql = go emptyBuilder []
+collectSimple connection sql = do
+  builder0 <- newBuilder
+  go builder0 []
   where
     go builder acc = do
       message <- nextMessage connection
       case message of
         RowDescription fs -> go builder {accFields = fs, accSawRowDescription = True} acc
-        DataRow values -> go builder {accRevRows = values : (accRevRows builder)} acc
+        DataRow values -> do
+          pushRow (accRows builder) values
+          go builder acc
         CommandComplete tag -> do
           writeIORef (lastError connection) (Just "")
-          go emptyBuilder (commandResult builder (Just tag) : acc)
+          result <- commandResult builder (Just tag)
+          builder' <- newBuilder
+          go builder' (result : acc)
         EmptyQueryResponse -> do
           writeIORef (lastError connection) (Just "")
-          go emptyBuilder (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" : acc)
+          builder' <- newBuilder
+          go builder' (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" : acc)
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
           writeIORef (lastError connection) (Just (formatResultError sql errMap))
-          go emptyBuilder (NativeResult FatalError [] [] Nothing errMap [] sql : acc)
+          builder' <- newBuilder
+          go builder' (NativeResult FatalError [] [] Nothing errMap [] sql : acc)
         CopyInResponse _ formats ->
           let fields = map copyField formats
            in pure (reverse (NativeResult CopyIn fields [] Nothing Map.empty [] "" : acc))
@@ -502,7 +562,9 @@ collectSimple connection sql = go emptyBuilder []
 
 -- | Collect the single result of an extended-protocol command.
 collectExtended :: Connection -> ByteString -> IO NativeResult
-collectExtended connection sql = go emptyBuilder Nothing
+collectExtended connection sql = do
+  builder0 <- newBuilder
+  go builder0 Nothing
   where
     go builder finished = do
       message <- nextMessage connection
@@ -510,51 +572,68 @@ collectExtended connection sql = go emptyBuilder Nothing
         RowDescription fs -> go builder {accFields = fs, accSawRowDescription = True} finished
         ParameterDescription oids -> go builder {accParamOids = oids} finished
         NoData -> go builder finished
-        DataRow values -> go builder {accRevRows = values : (accRevRows builder)} finished
+        DataRow values -> do
+          pushRow (accRows builder) values
+          go builder finished
         ParseComplete -> go builder finished
         BindComplete -> go builder finished
         CloseComplete -> go builder finished
-        PortalSuspended -> go emptyBuilder (finished <|> Just (commandResult builder Nothing))
+        PortalSuspended -> do
+          finished' <- case finished of
+            Just _ -> pure finished
+            Nothing -> Just <$> commandResult builder Nothing
+          builder' <- newBuilder
+          go builder' finished'
         CommandComplete tag -> do
           writeIORef (lastError connection) (Just "")
-          go emptyBuilder (Just (commandResult builder (Just tag)))
+          result <- commandResult builder (Just tag)
+          builder' <- newBuilder
+          go builder' (Just result)
         EmptyQueryResponse -> do
           writeIORef (lastError connection) (Just "")
-          go emptyBuilder (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
+          builder' <- newBuilder
+          go builder' (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
           writeIORef (lastError connection) (Just (formatResultError sql errMap))
-          go emptyBuilder (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
+          builder' <- newBuilder
+          go builder' (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
         ReadyForQuery txState -> do
           writeIORef (txStatus connection) txState
-          pure (fromMaybe (describeResult builder) finished)
+          case finished of
+            Just result -> pure result
+            Nothing -> describeResult builder
         _ -> go builder finished
 
 -- | A result terminated by @CommandComplete@\/@PortalSuspended@: 'TuplesOk' if a
 -- row description was seen, else 'CommandOk'.
-commandResult :: Builder -> Maybe ByteString -> NativeResult
-commandResult builder tag =
-  NativeResult
-    (if (accSawRowDescription builder) then TuplesOk else CommandOk)
-    (accFields builder)
-    (reverse (accRevRows builder))
-    tag
-    Map.empty
-    (accParamOids builder)
-    ""
+commandResult :: Builder -> Maybe ByteString -> IO NativeResult
+commandResult builder tag = do
+  rows <- freezeRowBuffer (accRows builder)
+  pure
+    $ NativeResult
+      (if (accSawRowDescription builder) then TuplesOk else CommandOk)
+      (accFields builder)
+      rows
+      tag
+      Map.empty
+      (accParamOids builder)
+      ""
 
 -- | A result with no command completion (a @Describe@\/@Parse@-only flow):
 -- 'CommandOk', carrying any column descriptions and parameter OIDs.
-describeResult :: Builder -> NativeResult
-describeResult builder =
-  NativeResult
-    CommandOk
-    (accFields builder)
-    (reverse (accRevRows builder))
-    Nothing
-    Map.empty
-    (accParamOids builder)
-    ""
+describeResult :: Builder -> IO NativeResult
+describeResult builder = do
+  rows <- freezeRowBuffer (accRows builder)
+  pure
+    $ NativeResult
+      CommandOk
+      (accFields builder)
+      rows
+      Nothing
+      Map.empty
+      (accParamOids builder)
+      ""
 
 lastMaybe :: [a] -> Maybe a
 lastMaybe = foldl (\_ x -> Just x) Nothing
