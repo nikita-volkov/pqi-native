@@ -9,7 +9,7 @@ module Pqi.Native
   )
 where
 
-import Control.Exception (IOException, catch)
+import Control.Exception (catch)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.Map.Strict as Map

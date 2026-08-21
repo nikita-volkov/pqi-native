@@ -465,10 +465,12 @@ connectionLostResult connection sql err = do
 -- 'hasql-pqi-native-decode-gc-bound' memory). This buffer holds only the
 -- array (which the RTS moves as one contiguous block, unlike a linked list)
 -- until 'freezeRowBuffer' walks it once into the final list.
-data RowBuffer = RowBuffer
-  { rowBufVec :: !(IORef (MVector.IOVector [Maybe ByteString])),
-    rowBufLen :: !(IORef Int)
-  }
+data RowBuffer
+  = RowBuffer
+      -- | The mutable vector of rows.
+      !(IORef (MVector.IOVector [Maybe ByteString]))
+      -- | Length.
+      !(IORef Int)
 
 newRowBuffer :: IO RowBuffer
 newRowBuffer = do
