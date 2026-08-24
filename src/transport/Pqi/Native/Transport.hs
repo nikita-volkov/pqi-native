@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -- | The byte-level transport: a TCP socket with a read buffer, plus the framing
 -- that turns the stream into discrete @[type byte][Int32 length][body]@
 -- messages.
@@ -20,6 +22,9 @@ import Control.Exception (mask_)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.IORef
+#if !defined(mingw32_HOST_OS)
+import GHC.Conc (atomically, orElse, threadWaitReadSTM, threadWaitWriteSTM)
+#endif
 import qualified Network.Socket as Socket
 import qualified Network.Socket.ByteString as Socket.ByteString
 import Pqi.Native.Transport.Prelude
@@ -97,8 +102,78 @@ socketFd :: Transport -> IO Int32
 socketFd transport = fromIntegral <$> Socket.unsafeFdSocket (socket transport)
 
 -- | Send a serialized message.
+--
+-- Mirrors libpq's @pqSendSome@ (@fe-misc.c@): a send that cannot complete
+-- immediately must not merely block on writability. The server may itself be
+-- blocked writing results this connection has not read yet, and a client
+-- blocked in @send@ cannot drain them, so both sides would wait forever -
+-- the exact pipeline deadlock the comment above libpq's own loop describes.
+-- So whenever the socket is not writable, incoming bytes are absorbed into
+-- the read buffer first and the wait is for /read-or-write/ readiness:
+-- whichever side can make progress does. Sending is preferred whenever the
+-- socket is writable (the @orElse@ in 'awaitWritableOrReadable' is
+-- left-biased), so a server streaming a large result cannot starve the
+-- send.
+#if defined(mingw32_HOST_OS)
+-- Windows keeps the plain blocking @sendAll@: GHC's I\/O manager has no
+-- dependable @threadWaitRead@\/@threadWaitWrite@ there, which the
+-- read-while-sending loop is built on. The deadlock the loop prevents is
+-- not Windows-specific, but reaching it needs the kernel socket buffers to
+-- fill while server output is pending, which the forwarding paths Windows
+-- clients typically sit behind make unlikely.
 send :: Transport -> Poker.Write -> IO ()
 send transport write = Socket.ByteString.sendAll (socket transport) (Poker.toByteString write)
+#else
+send :: Transport -> Poker.Write -> IO ()
+send transport write = go (Poker.toByteString write)
+  where
+    sock = socket transport
+    go bytes
+      | ByteString.null bytes = pure ()
+      | otherwise =
+          awaitWritableOrReadable sock >>= \case
+            True -> do
+              sent <- Socket.ByteString.send sock bytes
+              go (ByteString.drop sent bytes)
+            False -> do
+              drainIncoming transport
+              go bytes
+
+-- | Wait until the socket is writable or, failing that, readable, reporting
+-- which side woke ('True' for writable). Both waits are armed at once
+-- because a socket that stays unwritable can still keep receiving data the
+-- caller must absorb for the server's output path to keep draining.
+awaitWritableOrReadable :: Socket.Socket -> IO Bool
+awaitWritableOrReadable sock = do
+  fd <- Socket.unsafeFdSocket sock
+  (writable, cancelWritable) <- threadWaitWriteSTM (fromIntegral fd)
+  (readable, cancelReadable) <- threadWaitReadSTM (fromIntegral fd)
+  outcome <- atomically (fmap (\_ -> True) writable `orElse` fmap (\_ -> False) readable)
+  cancelReadable
+  cancelWritable
+  pure outcome
+
+-- | Absorb one chunk of incoming data into the read buffer - the analogue
+-- of libpq calling @pqReadData()@ inside its send loop. Only called once
+-- the socket has reported readable, so the @recv@ cannot block. The chunk
+-- is recorded under 'mask_' for the same reason as in 'fillTo': an async
+-- exception must never land between @recv@ returning and its bytes being
+-- recorded, or those bytes would be lost and the stream desynced. An empty
+-- chunk is the peer closing the connection mid-send, reported like every
+-- other transport-level EOF.
+drainIncoming :: Transport -> IO ()
+drainIncoming transport = do
+  closed <-
+    mask_ do
+      chunk <- Socket.ByteString.recv (socket transport) 65536
+      if ByteString.null chunk
+        then pure True
+        else do
+          modifyIORef' (readBuffer transport) (<> chunk)
+          pure False
+  when closed do
+    ioError (mkIOError eofErrorType "pqi-native: connection closed by server" Nothing Nothing)
+#endif
 
 -- | Ensure the read buffer holds at least @n@ bytes, pulling from the socket
 -- as needed. Throws on EOF before @n@ bytes are available.

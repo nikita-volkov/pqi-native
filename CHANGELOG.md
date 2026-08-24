@@ -1,3 +1,9 @@
+# v1.0.1.12
+
+## Fixes
+
+- Fixed a pipeline flow-control deadlock: a pipelined burst of commands larger than the socket buffers along the path can absorb, submitted before any result is read, used to wedge both sides permanently. `Pqi.Native.Transport.send` was a bare blocking `Network.Socket.ByteString.sendAll`, which never reads while sending; once the server has filled its output path with unread results it blocks in `ClientWrite` and stops reading the client's commands, so the client - still blocked in `send` with unsent bytes - can never finish, and neither side progresses again. libpq survives the same situation because its `pqSendSome` (`fe-misc.c`), on an incomplete send, calls `pqReadData()` to absorb incoming data and then `pqWait(true, true, …)` for read-or-write readiness, looping until its output is fully sent. `send` now mirrors that loop: whenever the socket is not writable, incoming bytes are drained into the transport's read buffer and the wait is armed for read-or-write readiness (write-biased, so a streaming server cannot starve the send); a peer closing mid-send surfaces as the same classified EOF the read side reports. On Windows the plain `sendAll` remains, as GHC's I/O manager cannot back the readiness wait there. Surfaced as hasql's `manyLargeResultsViaPipeline` benchmark hanging from 1.0.1.4 onward, after the default host resolution moved to the Unix-domain socket whose 8KB buffers expose what TCP's larger ones absorbed. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.SendQueryParams.PipelineFlowControl`.
+
 # v1.0.1.11
 
 ## Fixes
