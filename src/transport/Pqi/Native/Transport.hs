@@ -198,7 +198,7 @@ fillTo transport n = go
       let missing = n - ByteString.length buffered
       when (missing > 0) do
         closed <- mask_ do
-          chunk <- Socket.ByteString.recv (socket transport) (max 65536 missing)
+          chunk <- Socket.ByteString.recv (socket transport) (max 4096 missing)
           if ByteString.null chunk
             then pure True
             else do
