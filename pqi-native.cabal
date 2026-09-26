@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: pqi-native
-version: 1.0.1.12
+version: 1.0.1.13
 category: Database, PostgreSQL
 synopsis: Native (pure-Haskell) adapter for pqi
 description:
@@ -139,7 +139,7 @@ library
     base64-bytestring >=1.2 && <1.3,
     bytestring >=0.10 && <0.13,
     containers >=0.6 && <0.9,
-    crypton >=0.34 && <2,
+    crypton >=2.0.1 && <2.1,
     pqi ^>=1.1,
     pqi-native:transport,
     ptr-peeker ^>=0.2,

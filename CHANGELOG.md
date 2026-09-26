@@ -1,3 +1,9 @@
+# v1.0.1.13
+
+## Non-breaking
+
+- Migrated the `crypton` dependency from the `0.34`-`1.x` line to `2.0.1`, which replaces its internal `memory` dependency with `ram`/`base16`. `Pqi.Native.Auth`'s MD5 and SCRAM-SHA-256 logic (`Crypto.Hash`, `Crypto.KDF.PBKDF2`, `Crypto.MAC.HMAC`, `Crypto.Random`) needed no source changes; verified `hashWith`, `hmac`, and `fastPBKDF2_SHA256` still reproduce known MD5/SHA-256/HMAC-SHA256/PBKDF2 test vectors under `crypton-2.0.1`.
+
 # v1.0.1.12
 
 ## Fixes
