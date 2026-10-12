@@ -17,7 +17,7 @@ module Pqi.Native.Query
   )
 where
 
-import Control.Exception (IOException, catch, mask_)
+import Control.Exception (catch, mask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Vector.Mutable as MVector
@@ -25,7 +25,7 @@ import Pqi (ConnStatus (..), ExecStatus (..), Format (..), PipelineStatus (..))
 import Pqi.Native.Connection
 import Pqi.Native.Prelude
 import Pqi.Native.Transport.Message
-import Pqi.Native.Types (NativeResult (..), formatResultError)
+import Pqi.Native.Types (NativeResult (..), formatResultError, lostConnectionResult)
 import qualified PtrPoker.Write as Poker
 
 -- * Message construction
@@ -77,66 +77,50 @@ tooManyParams = (> maxParamCount) . length
 
 -- | Simple query. Returns the last result, mirroring @PQexec@.
 exec :: Connection -> ByteString -> IO (Maybe NativeResult)
-exec connection sql = withReady connection do
-  catch
-    (sendMessage connection (queryMessage sql) >> (lastMaybe <$> collectSimple connection sql))
-    (fmap Just . connectionLostResult connection sql)
+exec connection sql = withReady connection $ guardLoss do
+  sendMessage connection (queryMessage sql)
+  lastMaybe <$> collectSimple connection sql
 
 -- | Parameterized query via the extended protocol.
 execParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO (Maybe NativeResult)
 execParams connection sql params resultFormat
   | tooManyParams params = pure Nothing
-  | otherwise = withReady connection do
-      catch
-        (sendMessage connection (paramsWrite sql params resultFormat) >> (Just <$> collectExtended connection sql))
-        (fmap Just . connectionLostResult connection sql)
+  | otherwise = withReady connection $ guardLoss do
+      sendMessage connection (paramsWrite sql params resultFormat)
+      Just <$> collectExtended connection sql
 
 -- | Prepare a named statement.
 prepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO (Maybe NativeResult)
 prepare connection name sql parameterTypes
   | maybe False tooManyParams parameterTypes = pure Nothing
-  | otherwise = withReady connection do
-      catch
-        (sendMessage connection (prepareWrite name sql parameterTypes) >> (Just <$> collectExtended connection sql))
-        (fmap Just . connectionLostResult connection sql)
+  | otherwise = withReady connection $ guardLoss do
+      sendMessage connection (prepareWrite name sql parameterTypes)
+      Just <$> collectExtended connection sql
 
 -- | Execute a previously prepared statement.
 execPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO (Maybe NativeResult)
 execPrepared connection name params resultFormat
   | tooManyParams params = pure Nothing
-  | otherwise = withReady connection do
-      catch
-        (sendMessage connection (preparedWrite name params resultFormat) >> (Just <$> collectExtended connection ""))
-        (fmap Just . connectionLostResult connection "")
+  | otherwise = withReady connection $ guardLoss do
+      sendMessage connection (preparedWrite name params resultFormat)
+      Just <$> collectExtended connection ""
 
 -- * Asynchronous flows
 
 -- | Send a write in async mode, tracking pending commands for pipeline abort.
 --
--- A socket death mid-send (e.g. @EPIPE@\/@ECONNRESET@) surfaces here as an
--- escaped 'IOException' from 'Transport.send', which 'sendMessage' does not
--- catch. Left uncaught, it would blow straight through this function - and
--- every caller layered on it ('Pqi.Native.sendQuery' etc., 'Hasql.Comms.Send')
--- - as a raw exception instead of the @False@ that @PQsendQuery@ always
--- returns for a fatal send. Catching it here and marking the connection bad
--- keeps the contract: the caller sees a normal failed send, discoverable via
--- 'Pqi.status', exactly as libpq's own internals never throw and always
--- record the failure on the connection instead.
+-- Sending never throws. A failed write is not reported by the send but by
+-- the receive that follows, as in libpq (see 'sendMessage'), so a send on a
+-- usable connection returns 'True'. A send on a connection that is not
+-- usable returns 'False' and records why (see 'whenUsable').
 sendAsync :: Connection -> ByteString -> Poker.Write -> IO Bool
-sendAsync connection sql write = do
-  status <- readIORef (connStatus connection)
-  case status of
-    ConnectionOk ->
-      catch
-        do
-          sendMessage connection write
-          writeIORef (currentQuery connection) sql
-          writeIORef (asyncPending connection) True
-          pipeStatus <- readIORef (pipelineStatus connection)
-          when (pipeStatus /= PipelineOff) $ modifyIORef' (pendingCommands connection) (+ 1)
-          pure True
-        (\err -> False <$ markConnectionLost connection err)
-    _ -> pure False
+sendAsync connection sql write = whenUsable connection False do
+  sendMessage connection write
+  writeIORef (currentQuery connection) sql
+  writeIORef (asyncPending connection) True
+  pipeStatus <- readIORef (pipelineStatus connection)
+  when (pipeStatus /= PipelineOff) $ modifyIORef' (pendingCommands connection) (+ 1)
+  pure True
 
 -- | Whether the connection is in pipeline mode.
 inPipeline :: Connection -> IO Bool
@@ -232,8 +216,12 @@ sendDescribePortal connection name = do
 -- stall with no timer behind it. Masking keeps each transition atomic. The
 -- blocking read inside stays interruptible (see 'Transport.receiveFrame'), so
 -- this costs no abandonability.
+--
+-- A connection lost while waiting is reported as libpq reports it: this
+-- returns the result libpq makes up for it (see 'guardLoss'), and the call
+-- after that returns 'Nothing'.
 getNextResult :: Connection -> IO (Maybe NativeResult)
-getNextResult connection = mask_ do
+getNextResult connection = mask_ $ guardLoss do
   pending <- readIORef (asyncPending connection)
   if not pending
     then pure Nothing
@@ -242,6 +230,7 @@ getNextResult connection = mask_ do
       if sepPending
         then do
           writeIORef (pipelineSeparatorPending connection) False
+          startNextCommand
           pure Nothing
         else do
           singleRow <- readIORef (singleRowMode connection)
@@ -259,6 +248,15 @@ getNextResult connection = mask_ do
       when (pipeStatus /= PipelineOff) $ do
         modifyIORef' (pendingCommands connection) (subtract 1)
         writeIORef (pipelineSeparatorPending connection) True
+
+    -- Where libpq moves on to the next queued command (@pqPipelineProcessQueue@)
+    -- it clears the error message, which until then belongs to the command
+    -- that has just been reported. Nothing is cleared when that was the last
+    -- command.
+    startNextCommand = do
+      commands <- readIORef (pendingCommands connection)
+      syncs <- readIORef (pendingSyncs connection)
+      when (commands > 0 || syncs > 0) $ writeIORef (lastError connection) (Just "")
 
     -- Pop and discard this command's 'pendingParseOrigins' entry if it hasn't
     -- already been consumed by its own 'ParseComplete' (see the field's
@@ -284,11 +282,11 @@ getNextResult connection = mask_ do
           popOriginIfPending pipeStatus builder
           modifyIORef' (pendingCommands connection) (subtract 1)
           writeIORef (pipelineSeparatorPending connection) True
-          pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] ""))
+          pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] "" Nothing))
         else readAndProcess singleRow builder pipeStatus
 
     readAndProcess singleRow builder pipeStatus = do
-      message <- nextMessage connection
+      message <- receiveMessage connection
       case message of
         RowDescription fs ->
           go singleRow builder {accFields = fs, accSawRowDescription = True, accHadResponse = True}
@@ -300,7 +298,7 @@ getNextResult connection = mask_ do
           if singleRow
             then do
               writeIORef (singleRowFields connection) (accFields builder)
-              pure (Just (NativeResult SingleTuple (accFields builder) [values] Nothing Map.empty [] ""))
+              pure (Just (NativeResult SingleTuple (accFields builder) [values] Nothing Map.empty [] "" Nothing))
             else do
               pushRow (accRows builder) values
               go singleRow builder
@@ -318,7 +316,7 @@ getNextResult connection = mask_ do
           case origin of
             Just (Just True) -> do
               finishCommand pipeStatus
-              pure (Just (NativeResult CommandOk [] [] Nothing Map.empty [] ""))
+              pure (Just (NativeResult CommandOk [] [] Nothing Map.empty [] "" Nothing))
             Just _ -> go singleRow builder {accHadResponse = True, accOriginPopped = True}
             Nothing -> go singleRow builder {accHadResponse = True}
         BindComplete ->
@@ -331,7 +329,7 @@ getNextResult connection = mask_ do
               writeIORef (singleRowMode connection) False
               writeIORef (singleRowFields connection) []
               writeIORef (lastError connection) (Just "")
-              pure (Just (NativeResult TuplesOk (accFields builder) [] (Just tag) Map.empty [] ""))
+              pure (Just (NativeResult TuplesOk (accFields builder) [] (Just tag) Map.empty [] "" Nothing))
             else do
               writeIORef (lastError connection) (Just "")
               popOriginIfPending pipeStatus builder
@@ -341,7 +339,7 @@ getNextResult connection = mask_ do
           writeIORef (lastError connection) (Just "")
           popOriginIfPending pipeStatus builder
           finishCommand pipeStatus
-          pure (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
+          pure (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" Nothing))
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
           case pipeStatus of
@@ -350,16 +348,17 @@ getNextResult connection = mask_ do
               -- mode) but handle defensively.
               popOriginIfPending pipeStatus builder
               finishCommand pipeStatus
-              pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] ""))
+              pure (Just (NativeResult PipelineAbort [] [] Nothing Map.empty [] "" Nothing))
             PipelineOn -> do
               writeIORef (pipelineStatus connection) PipelineAborted
+              writeIORef (lastError connection) (Just (formatResultError "" errMap))
               popOriginIfPending pipeStatus builder
               finishCommand PipelineOn
-              pure (Just (NativeResult FatalError [] [] Nothing errMap [] ""))
+              pure (Just (NativeResult FatalError [] [] Nothing errMap [] "" Nothing))
             PipelineOff -> do
               sql <- readIORef (currentQuery connection)
               writeIORef (lastError connection) (Just (formatResultError sql errMap))
-              pure (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
+              pure (Just (NativeResult FatalError [] [] Nothing errMap [] sql Nothing))
         PortalSuspended ->
           Just <$> commandResult builder Nothing
         ReadyForQuery txState -> do
@@ -380,7 +379,8 @@ getNextResult connection = mask_ do
               -- so the next 'getNextResult' reads straight on to the next sync.
               remaining <- atomicModifyIORef' (pendingSyncs connection) (\n -> (n - 1, n - 1))
               when (remaining == 0) $ writeIORef (asyncPending connection) False
-              pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] ""))
+              startNextCommand
+              pure (Just (NativeResult PipelineSync [] [] Nothing Map.empty [] "" Nothing))
         _ -> go singleRow builder
 
 -- | Pop the next in-flight pipelined command's origin: @Just (Just True)@ if
@@ -400,15 +400,15 @@ popPendingParseOrigin connection =
 
 -- | Describe a prepared statement.
 describePrepared :: Connection -> ByteString -> IO (Maybe NativeResult)
-describePrepared connection name = withReady connection do
+describePrepared connection name = withReady connection $ guardLoss do
   sendMessage connection (describeStatementMessage name <> syncMessage)
-  catch (Just <$> collectExtended connection "") (fmap Just . connectionLostResult connection "")
+  Just <$> collectExtended connection ""
 
 -- | Describe a portal.
 describePortal :: Connection -> ByteString -> IO (Maybe NativeResult)
-describePortal connection name = withReady connection do
+describePortal connection name = withReady connection $ guardLoss do
   sendMessage connection (describePortalMessage name <> syncMessage)
-  catch (Just <$> collectExtended connection "") (fmap Just . connectionLostResult connection "")
+  Just <$> collectExtended connection ""
 
 -- * Parameter projections
 
@@ -437,24 +437,20 @@ formatCodeOf = \case
 -- * Result collection
 
 -- | Only run a flow on a ready connection; mirror libpq returning no result
--- when the connection is not usable.
+-- when the connection is not usable, with \"no connection to the server\" as
+-- the error message (see 'whenUsable').
 withReady :: Connection -> IO (Maybe a) -> IO (Maybe a)
-withReady connection action = do
-  status <- readIORef (connStatus connection)
-  case status of
-    ConnectionOk -> action
-    _ -> pure Nothing
+withReady connection = whenUsable connection Nothing
 
--- | Turn a read loop's escaped 'IOException' - e.g. a connection reset while
--- a result is still in flight - into a classified 'FatalError' result,
--- matching @PQexec@: libpq never throws here, it reports the same
--- "server closed the connection unexpectedly" wording it uses for a
--- handshake-time loss (see 'connectionLostMessage'), and marks the
--- connection bad so the caller's next call sees it too.
-connectionLostResult :: Connection -> ByteString -> IOException -> IO NativeResult
-connectionLostResult connection sql err = do
-  message <- markConnectionLost connection err
-  pure (NativeResult FatalError [] [] Nothing (Map.singleton 0x4d message) [] sql)
+-- | Run a flow that reads results off the connection, and if the connection
+-- is lost while it does ('receiveMessage' has recorded the loss by then),
+-- return the result libpq makes up for it. This is also what @PQexec@ returns
+-- when the loss comes after results that were already received, as it is the
+-- last result that counts. Everything else, an asynchronous exception
+-- included, propagates.
+guardLoss :: IO (Maybe NativeResult) -> IO (Maybe NativeResult)
+guardLoss flow =
+  flow `catch` \(ConnectionLost message) -> pure (Just (lostConnectionResult message))
 
 -- | A growable row buffer, replacing a cons-list-plus-reverse accumulation
 -- with amortized-O(1) appends into a doubling mutable vector. A statement's
@@ -531,7 +527,7 @@ collectSimple connection sql = do
   go builder0 []
   where
     go builder acc = do
-      message <- nextMessage connection
+      message <- receiveMessage connection
       case message of
         RowDescription fs -> go builder {accFields = fs, accSawRowDescription = True} acc
         DataRow values -> do
@@ -545,18 +541,18 @@ collectSimple connection sql = do
         EmptyQueryResponse -> do
           writeIORef (lastError connection) (Just "")
           builder' <- newBuilder
-          go builder' (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" : acc)
+          go builder' (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" Nothing : acc)
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
           writeIORef (lastError connection) (Just (formatResultError sql errMap))
           builder' <- newBuilder
-          go builder' (NativeResult FatalError [] [] Nothing errMap [] sql : acc)
+          go builder' (NativeResult FatalError [] [] Nothing errMap [] sql Nothing : acc)
         CopyInResponse _ formats ->
           let fields = map copyField formats
-           in pure (reverse (NativeResult CopyIn fields [] Nothing Map.empty [] "" : acc))
+           in pure (reverse (NativeResult CopyIn fields [] Nothing Map.empty [] "" Nothing : acc))
         CopyOutResponse _ formats ->
           let fields = map copyField formats
-           in pure (reverse (NativeResult CopyOut fields [] Nothing Map.empty [] "" : acc))
+           in pure (reverse (NativeResult CopyOut fields [] Nothing Map.empty [] "" Nothing : acc))
         ReadyForQuery txState -> do
           writeIORef (txStatus connection) txState
           pure (reverse acc)
@@ -569,7 +565,7 @@ collectExtended connection sql = do
   go builder0 Nothing
   where
     go builder finished = do
-      message <- nextMessage connection
+      message <- receiveMessage connection
       case message of
         RowDescription fs -> go builder {accFields = fs, accSawRowDescription = True} finished
         ParameterDescription oids -> go builder {accParamOids = oids} finished
@@ -594,12 +590,12 @@ collectExtended connection sql = do
         EmptyQueryResponse -> do
           writeIORef (lastError connection) (Just "")
           builder' <- newBuilder
-          go builder' (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] ""))
+          go builder' (Just (NativeResult EmptyQuery [] [] Nothing Map.empty [] "" Nothing))
         ErrorResponse fs -> do
           let errMap = Map.fromList fs
           writeIORef (lastError connection) (Just (formatResultError sql errMap))
           builder' <- newBuilder
-          go builder' (Just (NativeResult FatalError [] [] Nothing errMap [] sql))
+          go builder' (Just (NativeResult FatalError [] [] Nothing errMap [] sql Nothing))
         ReadyForQuery txState -> do
           writeIORef (txStatus connection) txState
           case finished of
@@ -621,6 +617,7 @@ commandResult builder tag = do
       Map.empty
       (accParamOids builder)
       ""
+      Nothing
 
 -- | A result with no command completion (a @Describe@\/@Parse@-only flow):
 -- 'CommandOk', carrying any column descriptions and parameter OIDs.
@@ -636,6 +633,7 @@ describeResult builder = do
       Map.empty
       (accParamOids builder)
       ""
+      Nothing
 
 lastMaybe :: [a] -> Maybe a
 lastMaybe = foldl (\_ x -> Just x) Nothing

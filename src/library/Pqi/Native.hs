@@ -9,7 +9,6 @@ module Pqi.Native
   )
 where
 
-import Control.Exception (catch)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.Map.Strict as Map
@@ -68,6 +67,7 @@ mkConnection connection =
     { Pqi.connectPoll = pure Pqi.PollingOk,
       Pqi.isNullConnection = (Connection.isNull connection),
       Pqi.finish = do
+        -- Safe after a lost connection, which has closed the socket already.
         transport <- readIORef (Connection.transport connection)
         Transport.close transport
         -- Mark the connection unusable so that any further protocol
@@ -90,7 +90,14 @@ mkConnection connection =
       Pqi.port = pure (Just (ByteString.Char8.pack (show (Connection.port (Connection.info connection))))),
       Pqi.options = pure (Just ""),
       Pqi.status = readIORef (Connection.connStatus connection),
-      Pqi.transactionStatus = transactionStatusOf <$> readIORef (Connection.txStatus connection),
+      Pqi.transactionStatus = do
+        -- As libpq's @PQtransactionStatus@: nothing is known of the
+        -- transaction on a connection that is not usable, whatever the
+        -- last @ReadyForQuery@ said.
+        status <- readIORef (Connection.connStatus connection)
+        case status of
+          Pqi.ConnectionOk -> transactionStatusOf <$> readIORef (Connection.txStatus connection)
+          _ -> pure Pqi.TransUnknown,
       Pqi.parameterStatus = \name -> Map.lookup name <$> readIORef (Connection.parameters connection),
       Pqi.protocolVersion = pure 3,
       Pqi.serverVersion =
@@ -99,7 +106,8 @@ mkConnection connection =
       Pqi.socket = do
         transport <- readIORef (Connection.transport connection)
         fd <- Transport.socketFd transport
-        pure (Just (fromIntegral fd :: Fd)),
+        -- A dropped connection has no socket, as libpq's @PQsocket@ reports.
+        pure (if fd < 0 then Nothing else Just (fromIntegral fd :: Fd)),
       Pqi.backendPID = maybe 0 fst <$> readIORef (Connection.backendKey connection),
       Pqi.connectionNeedsPassword = do
         needed <- readIORef (Connection.passwordNeeded connection)
@@ -148,22 +156,16 @@ mkConnection connection =
           then pure False
           else writeIORef (Connection.pipelineStatus connection) Pqi.PipelineOff $> True,
       -- Both of these send directly, bypassing 'Query.sendAsync' (there is no
-      -- result-bearing command to track), so they need their own escape
-      -- hatch for the same class of failure 'Query.sendAsync' guards
-      -- against: a socket death mid-send throwing instead of the @False@
-      -- @PQpipelineSync@\/@PQsendFlushRequest@ return on a fatal send.
-      Pqi.pipelineSync =
-        catch
-          do
-            Connection.sendMessage connection syncMessage
-            modifyIORef' (Connection.pendingSyncs connection) (+ 1)
-            writeIORef (Connection.asyncPending connection) True
-            pure True
-          (\err -> False <$ Connection.markConnectionLost connection err),
-      Pqi.sendFlushRequest =
-        catch
-          (Connection.sendMessage connection flushMessage $> True)
-          (\err -> False <$ Connection.markConnectionLost connection err),
+      -- result-bearing command to track), so they refuse a connection that
+      -- is not usable themselves, the way it does.
+      Pqi.pipelineSync = Connection.whenUsable connection False do
+        Connection.sendMessage connection syncMessage
+        modifyIORef' (Connection.pendingSyncs connection) (+ 1)
+        writeIORef (Connection.asyncPending connection) True
+        pure True,
+      Pqi.sendFlushRequest = Connection.whenUsable connection False do
+        Connection.sendMessage connection flushMessage
+        pure True,
       Pqi.getCancel = do
         key <- readIORef (Connection.backendKey connection)
         pure
@@ -185,8 +187,11 @@ mkConnection connection =
       Pqi.disableNoticeReporting = writeIORef (Connection.noticeReporting connection) False,
       Pqi.enableNoticeReporting = writeIORef (Connection.noticeReporting connection) True,
       Pqi.getNotice = popFirst (Connection.notices connection),
-      Pqi.putCopyData = \payload -> Connection.sendMessage connection (copyDataMessage payload) $> Pqi.CopyInOk,
-      Pqi.putCopyEnd = \reason -> do
+      Pqi.putCopyData = \payload ->
+        Connection.whenUsable connection Pqi.CopyInError
+          $ Connection.sendMessage connection (copyDataMessage payload)
+          $> Pqi.CopyInOk,
+      Pqi.putCopyEnd = \reason -> Connection.whenUsable connection Pqi.CopyInError do
         Connection.sendMessage connection (maybe copyDoneMessage copyFailMessage reason)
         writeIORef (Connection.asyncPending connection) True
         pure Pqi.CopyInOk,

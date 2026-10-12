@@ -4,6 +4,7 @@
 module Pqi.Native.Types
   ( NativeResult (..),
     NativeCancel (..),
+    lostConnectionResult,
     mkResult,
     mkCancel,
     formatErrorFields,
@@ -43,9 +44,23 @@ data NativeResult = NativeResult
     -- position context in 'resultErrorMessage', matching libpq's behaviour).
     -- Empty for non-error results and for async results where the query is
     -- unavailable.
-    queryText :: ByteString
+    queryText :: ByteString,
+    -- | A message that is not derived from wire error fields, returned
+    -- verbatim by 'resultErrorMessage' in place of the formatted fields. Only
+    -- the result libpq makes up for a lost connection has one (see
+    -- 'lostConnectionResult'); every result built from server messages has
+    -- 'Nothing'.
+    literalErrorMessage :: Maybe ByteString
   }
   deriving stock (Eq, Show)
+
+-- | The result libpq makes up when the connection is lost while a flow is
+-- waiting for the server (@pqPrepareAsyncResult@ in @fe-exec.c@): a
+-- 'FatalError' with no error fields at all, hence no SQLSTATE, whose
+-- message is the given text verbatim.
+lostConnectionResult :: ByteString -> NativeResult
+lostConnectionResult message =
+  NativeResult FatalError [] [] Nothing Map.empty [] "" (Just message)
 
 -- | A standalone cancellation handle for the native adapter.
 --
@@ -146,7 +161,12 @@ mkResult :: NativeResult -> Result
 mkResult result =
   Result
     { resultStatus = pure (status result),
-      resultErrorMessage = pure (Just (formatResultError (queryText result) (errorFields result))),
+      resultErrorMessage =
+        pure
+          $ Just
+          $ fromMaybe
+            (formatResultError (queryText result) (errorFields result))
+            (literalErrorMessage result),
       resultErrorField = \field -> pure (Map.lookup (fieldCodeByte field) (errorFields result)),
       unsafeFreeResult = pure (),
       ntuples = pure (fromIntegral (length (rows result))),

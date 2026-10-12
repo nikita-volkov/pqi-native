@@ -11,22 +11,25 @@ module Pqi.Native.Connection
     nullConnection,
     reconnect,
     nextMessage,
+    receiveMessage,
+    ConnectionLost (..),
     sendMessage,
     fieldValue,
     setError,
-    connectionLostMessage,
-    markConnectionLost,
+    loseConnection,
+    whenUsable,
   )
 where
 
-import Control.Exception (IOException, SomeException, catch, try)
+import Control.Exception (Exception, IOException, SomeException, catch, throwIO, try)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import GHC.IO.Exception (IOErrorType (ResourceVanished), ioe_description, ioe_location, ioe_type)
+import Foreign.C.Error (Errno (..), errnoToIOError)
+import GHC.IO.Exception (IOErrorType (ResourceVanished), ioe_description, ioe_errno, ioe_location, ioe_type)
 import Pqi (ConnStatus (..), Notify (..), PipelineStatus (..), Verbosity (..))
 import qualified Pqi.Native.Auth as Auth
 import Pqi.Native.Prelude
@@ -320,39 +323,92 @@ data Connection = Connection
     -- mirroring libpq's @password_needed@. Trust\/peer\/GSS authentication
     -- never sets this, regardless of whether a password was supplied in the
     -- conninfo.
-    passwordNeeded :: IORef Bool
+    passwordNeeded :: IORef Bool,
+    -- | Set once a socket-level write has failed, mirroring libpq's
+    -- @write_failed@. From then on nothing more is written, and the failure
+    -- is reported by the read that follows. See 'sendMessage'.
+    writeFailed :: IORef Bool
   }
 
 -- | Send a serialized frontend message.
+--
+-- A failed write does not surface here, the way it does not in libpq
+-- (@pqsecure_raw_write@ in @fe-secure.c@): the failure is remembered in
+-- 'writeFailed', the data is discarded, and the caller is told the send
+-- succeeded. The reason is that the server may have sent an error that
+-- explains the closed socket - a @FATAL@ announcing its termination, say -
+-- and reporting the write failure first would hide it. The loss is detected
+-- by the receive that follows ('receiveMessage'), which is also where
+-- libpq reports it. Everything after a failed write is discarded for the
+-- same reason libpq gives: the stream has lost its message boundaries.
+--
+-- Only 'IOException' is caught, so an asynchronous exception interrupting a
+-- send propagates untouched.
 sendMessage :: Connection -> Poker.Write -> IO ()
 sendMessage connection write = do
-  transport <- readIORef (transport connection)
-  Transport.send transport write
+  failed <- readIORef (writeFailed connection)
+  unless failed do
+    transport <- readIORef (transport connection)
+    Transport.send transport write
+      `catch` \(_ :: IOException) -> writeIORef (writeFailed connection) True
 
 -- | Receive the next /protocol-relevant/ backend message, transparently
 -- consuming and recording the asynchronous messages the backend may interleave
 -- at any time: @ParameterStatus@ (updates the parameter map), @NoticeResponse@
 -- (collected when notice reporting is on), and @NotificationResponse@ (queued).
+--
+-- A transport failure propagates as the 'IOException' it is. The handshake
+-- classifies it itself; every other flow uses 'receiveMessage'.
 nextMessage :: Connection -> IO BackendMessage
-nextMessage connection = do
+nextMessage = nextMessageVia Transport.receiveFrame
+
+-- | 'nextMessage' for the flows that report a lost connection the way libpq
+-- does.
+--
+-- A transport failure - the peer closed the connection (EOF), or the
+-- socket failed - is turned into the loss libpq's @pqReadData@ records:
+-- 'loseConnection' with libpq's text for the cause, and then the
+-- 'ConnectionLost' failure, which the flow boundaries catch and turn into
+-- libpq's made-up result. That is the only 'IOException' caught: a protocol
+-- decode error, and any asynchronous exception interrupting the wait (which
+-- hasql relies on to clean up afterwards), propagate untouched.
+receiveMessage :: Connection -> IO BackendMessage
+receiveMessage connection = nextMessageVia receive connection
+  where
+    receive transport =
+      Transport.receiveFrame transport `catch` \err -> do
+        let message = receiveFailureMessage err
+        loseConnection connection message
+        throwIO (ConnectionLost message)
+
+-- | The connection was lost while a flow was reading from it: raised by
+-- 'receiveMessage' once 'loseConnection' has recorded the loss, carrying the
+-- text that was recorded. Not exported from the package.
+newtype ConnectionLost = ConnectionLost ByteString
+  deriving stock (Show)
+
+instance Exception ConnectionLost
+
+nextMessageVia :: (Transport -> IO (Word8, ByteString)) -> Connection -> IO BackendMessage
+nextMessageVia receiveFrame connection = do
   transport <- readIORef (transport connection)
-  (typeByte, body) <- Transport.receiveFrame transport
+  (typeByte, body) <- receiveFrame transport
   case decodeBackendMessage typeByte body of
     Left err -> ioError (userError ("pqi-native: protocol decode error: " <> show err))
     Right message -> case message of
       ParameterStatus key value -> do
         modifyIORef' (parameters connection) (Map.insert key value)
-        nextMessage connection
+        nextMessageVia receiveFrame connection
       NoticeResponse fields -> do
         reporting <- readIORef (noticeReporting connection)
         when reporting $ do
           let noticeText = formatErrorFields (Map.fromList fields)
           unless (ByteString.null noticeText)
             $ modifyIORef' (notices connection) (noticeText :)
-        nextMessage connection
+        nextMessageVia receiveFrame connection
       NotificationResponse pid channel payload -> do
         modifyIORef' (pendingNotifications connection) (Notify channel pid payload :)
-        nextMessage connection
+        nextMessageVia receiveFrame connection
       other -> pure other
 
 -- | Look up an error\/notice field by its single-byte code.
@@ -428,16 +484,67 @@ connectionLostMessage err
       "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request."
   | otherwise = ByteString.Char8.pack (show err)
 
--- | Record an escaped 'IOException' from the transport - a send or a read,
--- at any point in a flow - the way libpq's own internals do: never throw,
--- just mark the connection bad with the classified message ('connectionLostMessage'),
--- so every subsequent call - starting with the one already in flight - sees
--- it via 'Pqi.status'\/'Pqi.errorMessage'.
-markConnectionLost :: Connection -> IOException -> IO ByteString
-markConnectionLost connection err = do
-  let message = connectionLostMessage err
-  setError connection (message <> "\n")
-  pure message
+-- | libpq's text for a failed read, from @pqReadData@ and
+-- @pqsecure_raw_read@: the connection lost outright (EOF, or a reset) gets
+-- the \"server closed the connection unexpectedly\" sentence, and any other
+-- socket error \"could not receive data from server\" followed by the
+-- @strerror@ of its errno. Ends with a newline, as every message libpq
+-- appends to the connection's error message does.
+receiveFailureMessage :: IOException -> ByteString
+receiveFailureMessage err
+  | isConnectionLost err = connectionLostMessage err <> "\n"
+  | otherwise = "could not receive data from server: " <> strerror err <> "\n"
+
+-- | The @strerror@ text of an 'IOException' that came from a failed system
+-- call, derived from its errno rather than from its 'show'n form.
+strerror :: IOException -> ByteString
+strerror err =
+  ByteString.Char8.pack case ioe_errno err of
+    Just errno -> ioe_description (errnoToIOError "" (Errno errno) Nothing Nothing)
+    Nothing -> ioe_description err
+
+-- | The connection has been lost: do what libpq does when its read finds
+-- the connection closed or failed (@pqReadData@ and @pqDropConnection@ in
+-- @fe-misc.c@\/@fe-connect.c@, then the @IDLE@ that @PQgetResult@ sets).
+-- This is the one place that knows what a lost connection looks like.
+--
+-- * The text is /appended/ to the connection's error message, after
+--   whatever was recorded before it (the @FATAL@ the server announced the
+--   termination with, say).
+-- * The status becomes 'ConnectionBad', and the socket is dropped. 'finish'
+--   closes it again, which is harmless.
+-- * Nothing is in flight any more, and the commands that were queued in
+--   pipeline mode are forgotten, without any 'PipelineAbort' results being
+--   made up for them: those are for errors the /server/ reported.
+--
+-- The pipeline status itself is left as it is, as it is in libpq.
+loseConnection :: Connection -> ByteString -> IO ()
+loseConnection connection message = do
+  modifyIORef' (lastError connection) (Just . (<> message) . fromMaybe "")
+  writeIORef (connStatus connection) ConnectionBad
+  transport <- readIORef (transport connection)
+  Transport.close transport
+  writeIORef (asyncPending connection) False
+  writeIORef (pendingCommands connection) 0
+  writeIORef (pendingSyncs connection) 0
+  writeIORef (pendingParseOrigins connection) Seq.empty
+  writeIORef (pipelineSeparatorPending connection) False
+
+-- | Run an operation on a usable connection. On any other it is refused as
+-- libpq's @PQsendQueryStart@ refuses a send: the given refusal is returned
+-- in its place, and the error message becomes \"no connection to the
+-- server\", replacing whatever was there unless commands are still queued in
+-- a pipeline, in which case it belongs to them and is appended to.
+whenUsable :: Connection -> a -> IO a -> IO a
+whenUsable connection refusal operation = do
+  status <- readIORef (connStatus connection)
+  case status of
+    ConnectionOk -> operation
+    _ -> do
+      queued <- readIORef (pendingCommands connection)
+      when (queued == 0) $ writeIORef (lastError connection) (Just "")
+      modifyIORef' (lastError connection) (Just . (<> "no connection to the server\n") . fromMaybe "")
+      pure refusal
 
 -- | The handshake-failure message ('failWith', inside 'handshake') for a
 -- Unix-domain socket connection: names the socket path rather than a
@@ -539,6 +646,7 @@ reconnect connection = do
   writeIORef (connStatus connection) ConnectionBad
   writeIORef (lastError connection) (Just "")
   writeIORef (passwordNeeded connection) False
+  writeIORef (writeFailed connection) False
   sendMessage connection (startupMessage (startupParams (info connection)))
   handshake connection
 
@@ -571,6 +679,7 @@ newConnection isNull transport info = do
     <*> newIORef Seq.empty
     <*> newIORef ErrorsDefault
     <*> newIORef ""
+    <*> newIORef False
     <*> newIORef False
 
 -- | The startup\/authentication state machine, ending at the first
