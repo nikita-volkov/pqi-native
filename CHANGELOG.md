@@ -1,3 +1,9 @@
+# v1.0.1.15
+
+## Fixes
+
+- Fixed the `hostaddr` conninfo parameter being ignored ([#11](https://github.com/nikita-volkov/pqi-native/issues/11)). With a `hostaddr`, libpq connects to that numeric address and never resolves `host`, which it keeps only for authentication and for naming the server in messages. `pqi-native` had no notion of it: it resolved `host` through DNS regardless, so a conninfo whose `host` does not resolve failed to connect, and the `hostaddr` key was forwarded to the server in the startup packet as if it were a run-time setting, which libpq never does. `hostaddr` is now parsed from both the `key=value` form and the URI's query string, kept out of the startup parameters, and dialled over TCP in preference to `host`, also when `host` is a Unix-domain socket directory, and also by a later `cancel` and `reset`. `host` is still what `Pqi.host` reports. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.Connectdb.Hostaddr`.
+
 # v1.0.1.14
 
 ## Fixes

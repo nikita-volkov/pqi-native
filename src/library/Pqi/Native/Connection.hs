@@ -49,6 +49,10 @@ import System.Posix.User (getEffectiveUserName)
 -- | Parsed connection parameters (the @key=value@ subset we support).
 data ConnInfo = ConnInfo
   { host :: ByteString,
+    -- | The numeric address to connect to, or empty when none was given.
+    -- When present it is the one dialled, over TCP, and 'host' is left
+    -- unresolved: see 'Transport.connect'.
+    hostaddr :: ByteString,
     port :: Int,
     user :: ByteString,
     database :: ByteString,
@@ -158,6 +162,7 @@ parseKeyValue :: ByteString -> ByteString -> ByteString -> ConnInfo
 parseKeyValue dfltUser dfltHost raw =
   ConnInfo
     { host = defaultIfEmpty dfltHost (get "host" ""),
+      hostaddr = get "hostaddr" "",
       port = maybe 5432 fst (ByteString.Char8.readInt (get "port" "5432")),
       user = theUser,
       database = get "dbname" theUser,
@@ -182,14 +187,14 @@ defaultIfEmpty dflt raw
 -- | Conninfo keys already surfaced via their own 'ConnInfo' fields, so they're
 -- excluded from 'extraParams' rather than duplicated there.
 reservedKeys :: Set.Set ByteString
-reservedKeys = Set.fromList ["host", "port", "user", "dbname", "password"]
+reservedKeys = Set.fromList ["host", "hostaddr", "port", "user", "dbname", "password"]
 
 -- | Parse the authority+path portion of a @postgresql://@ URI (scheme already
 -- stripped). Handles @[user[:password]@][host[:port]][/dbname]@; ignores query
 -- parameters other than what appears in those components.
 parseUri :: ByteString -> ByteString -> ByteString -> ConnInfo
 parseUri dfltUser dfltHost withoutScheme =
-  ConnInfo {host, port, user, database, password, extraParams}
+  ConnInfo {host, hostaddr, port, user, database, password, extraParams}
   where
     -- Split off optional "userinfo@" prefix. The '@' is unambiguous in this
     -- position: hosts do not contain '@' in practice.
@@ -220,10 +225,11 @@ parseUri dfltUser dfltHost withoutScheme =
     -- (e.g. ?application_name=foo&sslmode=disable).
     rawQuery = ByteString.drop 1 (ByteString.dropWhile (/= 0x3f) pathAndQuery)
 
-    extraParams =
-      Map.withoutKeys
-        (Map.fromList (mapMaybe toQueryPair (ByteString.split 0x26 rawQuery)))
-        reservedKeys
+    queryParams = Map.fromList (mapMaybe toQueryPair (ByteString.split 0x26 rawQuery))
+
+    extraParams = Map.withoutKeys queryParams reservedKeys
+
+    hostaddr = Map.findWithDefault "" "hostaddr" queryParams
 
     toQueryPair token = case ByteString.elemIndex 0x3d token of
       Just i ->
@@ -421,12 +427,19 @@ setError connection message = do
   writeIORef (lastError connection) (Just message)
   writeIORef (connStatus connection) ConnectionBad
 
+-- | Whether the connection goes through a Unix-domain socket. A @hostaddr@
+-- always makes it a TCP one, whatever the @host@ looks like: see
+-- 'Transport.connect'.
+viaUnixSocket :: ConnInfo -> Bool
+viaUnixSocket connInfo =
+  ByteString.null (hostaddr connInfo) && Transport.isUnixSocketHost (host connInfo)
+
 -- | Format an initial-connect failure (the socket couldn't even be opened),
 -- matching libpq's distinct phrasing for a Unix-domain socket, a DNS
 -- resolution failure, and any other TCP connect failure.
 connectFailureMessage :: ConnInfo -> IOException -> ByteString
 connectFailureMessage connInfo err
-  | Transport.isUnixSocketHost (host connInfo) =
+  | viaUnixSocket connInfo =
       unixSocketFailureMessage
         connInfo
         ( ByteString.Char8.pack (ioe_description err)
@@ -439,11 +452,17 @@ connectFailureMessage connInfo err
   -- rather than the generic "could not connect to server".
   | "getAddrInfo" `isInfixOf` ioe_location err =
       "could not translate host name \""
-        <> host connInfo
+        <> dialled
         <> "\" to address: "
         <> ByteString.Char8.pack (ioe_description err)
         <> "\n"
   | otherwise = "could not connect to server: " <> ByteString.Char8.pack (show err)
+  where
+    -- libpq names the address it resolved, which is the @hostaddr@ when there
+    -- is one.
+    dialled
+      | ByteString.null (hostaddr connInfo) = host connInfo
+      | otherwise = hostaddr connInfo
 
 -- | Format a handshake-time 'IOException' - e.g. the server closing the
 -- socket mid-rejection, as when shedding load with \"sorry, too many clients
@@ -460,7 +479,7 @@ handshakeFailureMessage connection connInfo err = do
   let fmtFields
         | isConnectionLost err = connectionLostMessage err <> "\n"
         | otherwise = connectionLostMessage err
-  if Transport.isUnixSocketHost (host connInfo)
+  if viaUnixSocket connInfo
     then pure (unixSocketFailureMessage connInfo fmtFields)
     else tcpFailureMessage connection connInfo fmtFields
 
@@ -606,7 +625,7 @@ establish conninfo = do
       pure connection
     Right dfltUser -> do
       let info = parseConnInfo conninfo dfltUser dfltHost
-      transportResult <- try @IOException (Transport.connect (host info) (port info))
+      transportResult <- try @IOException (Transport.connect (host info) (hostaddr info) (port info))
       case transportResult of
         Left err -> do
           transport <- Transport.unconnected
@@ -638,7 +657,7 @@ reconnect :: Connection -> IO ()
 reconnect connection = do
   oldTransport <- readIORef (transport connection)
   Transport.close oldTransport
-  newTransport <- Transport.connect (host (info connection)) (port (info connection))
+  newTransport <- Transport.connect (host (info connection)) (hostaddr (info connection)) (port (info connection))
   writeIORef (transport connection) newTransport
   writeIORef (parameters connection) Map.empty
   writeIORef (backendKey connection) Nothing
@@ -722,7 +741,7 @@ handshake connection = authenticating
       let fmtFields = formatErrorFields (Map.fromList fields)
           connInfo = info connection
       message <-
-        if Transport.isUnixSocketHost (host connInfo)
+        if viaUnixSocket connInfo
           then pure (unixSocketFailureMessage connInfo fmtFields)
           else tcpFailureMessage connection connInfo fmtFields
       setError connection message

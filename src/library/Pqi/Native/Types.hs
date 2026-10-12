@@ -78,6 +78,8 @@ lostConnectionResult message =
 --   completions are in, @pendingCommands@ is 0 and the server is idle.
 data NativeCancel = NativeCancel
   { host :: ByteString,
+    -- | Empty when the connection was not given a @hostaddr@.
+    hostaddr :: ByteString,
     port :: Int,
     pid :: Int32,
     secret :: Int32,
@@ -205,7 +207,7 @@ mkCancel nc =
         if not pending
           then pure (Right ())
           else do
-            transport <- Transport.connect (host nc) (port nc)
+            transport <- Transport.connect (host nc) (hostaddr nc) (port nc)
             Transport.send transport (cancelRequest (pid nc) (secret nc))
             -- Read until EOF to ensure the server has processed the cancel request
             -- before we close the connection. This matches libpq's PQcancel behavior

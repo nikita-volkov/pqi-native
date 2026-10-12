@@ -37,13 +37,21 @@ data Transport = Transport
     readBuffer :: IORef ByteString
   }
 
--- | Open a connection to the given host and port. Mirroring libpq: if the
--- host looks like an absolute path (starts with @\/@ - see 'isUnixSocketHost'),
--- it names a Unix-domain socket /directory/ rather than a TCP host, and the
--- connection is made to the socket file @'unixSocketPath' host port@ within
--- it. Otherwise a TCP connection is made, resolving the host via DNS.
-connect :: ByteString -> Int -> IO Transport
-connect host port
+-- | Open a connection to the given host, numeric host address and port, in
+-- the order libpq considers them:
+--
+-- 1. A non-empty @hostaddr@ is connected to over TCP, and the @host@ is not
+--    consulted at all: it is not resolved, and a path-like one does not
+--    select a Unix-domain socket. libpq keeps it only for authentication and
+--    for naming the server in messages.
+-- 2. Otherwise, if the host looks like an absolute path (starts with @\/@ -
+--    see 'isUnixSocketHost'), it names a Unix-domain socket /directory/
+--    rather than a TCP host, and the connection is made to the socket file
+--    @'unixSocketPath' host port@ within it.
+-- 3. Otherwise a TCP connection is made, resolving the host via DNS.
+connect :: ByteString -> ByteString -> Int -> IO Transport
+connect host hostaddr port
+  | not (ByteString.null hostaddr) = connectTcp hostaddr port
   | isUnixSocketHost host = connectUnix (unixSocketPath host port)
   | otherwise = connectTcp host port
 

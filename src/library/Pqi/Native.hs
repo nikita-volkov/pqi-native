@@ -174,6 +174,7 @@ mkConnection connection =
                 mkCancel
                   NativeCancel
                     { host = Connection.host (Connection.info connection),
+                      hostaddr = Connection.hostaddr (Connection.info connection),
                       port = Connection.port (Connection.info connection),
                       pid,
                       secret,
