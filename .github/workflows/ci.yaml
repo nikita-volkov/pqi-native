@@ -12,9 +12,9 @@ permissions:
 
 jobs:
   ci:
-    uses: nikita-volkov/haskell-hackage-lib-github-actions-workflows/.github/workflows/ci.yaml@v5
+    uses: nikita-volkov/haskell-hackage-lib-github-actions-workflows/.github/workflows/ci.yaml@macos-clt-linker
     secrets: inherit
     with:
       test-options: --qc-max-success=${{ github.event_name == 'pull_request' && '1000' || '10000' }}
       windows: true
-      macos: false
+      macos: true
