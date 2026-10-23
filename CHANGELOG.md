@@ -1,3 +1,9 @@
+# v1.0.1.15
+
+## Fixes
+
+- Fixed receiving a large message allocating quadratically in its size ([#13](https://github.com/nikita-volkov/pqi-native/issues/13)). `Transport.fillTo` appended every received chunk to a strict `ByteString`, copying the whole accumulated frame on each receive, and asked `recv` for a buffer as large as the rest of the frame, allocating that much again on each receive. A single 64 MiB `bytea` field allocated ~512 GiB over a Unix-domain socket. The read buffer is now a pinned storage that the socket is read straight into with `recvBuf`. It is replaced by a larger one only when a frame does not fit, sized exactly for a large frame and doubling otherwise, and frames are handed out as slices of it rather than copies. The same 64 MiB field now allocates 2.0 times its size on the Haskell heap: the receive and the copy `getvalue` returns. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.ExecParams.LargeField`.
+
 # v1.0.1.14
 
 ## Fixes

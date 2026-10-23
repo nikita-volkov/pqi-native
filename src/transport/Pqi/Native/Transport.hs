@@ -21,7 +21,11 @@ where
 import Control.Exception (mask_)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
+import qualified Data.ByteString.Internal as ByteString.Internal
 import Data.IORef
+import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (plusPtr)
 #if !defined(mingw32_HOST_OS)
 import GHC.Conc (atomically, orElse, threadWaitReadSTM, threadWaitWriteSTM)
 #endif
@@ -34,8 +38,79 @@ import System.IO.Error (eofErrorType, mkIOError)
 -- | An open connection's byte transport.
 data Transport = Transport
   { socket :: Socket.Socket,
-    readBuffer :: IORef ByteString
+    readBuffer :: IORef ReadBuffer
   }
+
+-- | Bytes received from the socket and not yet consumed: the region
+-- @[start, end)@ of a pinned @storage@ of @capacity@ bytes. The socket is
+-- read straight into the free region @[end, capacity)@, so a received byte
+-- is copied only when the live region is moved to a larger storage.
+--
+-- Bytes before @end@ are never written again: the frames 'receiveFrame'
+-- hands out are slices of the storage, so making room always allocates a
+-- fresh storage rather than compacting in place.
+data ReadBuffer = ReadBuffer
+  { storage :: ForeignPtr Word8,
+    capacity :: Int,
+    start :: Int,
+    end :: Int
+  }
+
+newReadBuffer :: IO (IORef ReadBuffer)
+newReadBuffer = do
+  storage <- ByteString.Internal.mallocByteString 0
+  newIORef ReadBuffer {storage, capacity = 0, start = 0, end = 0}
+
+-- | The buffered bytes, as a slice of the storage.
+buffered :: ReadBuffer -> ByteString
+buffered buffer =
+  ByteString.Internal.fromForeignPtr (storage buffer) (start buffer) (end buffer - start buffer)
+
+-- | Make room for the buffer to hold @n@ bytes in all, moving the buffered
+-- bytes to a fresh storage if the current one cannot. The new storage is
+-- exactly @n@ bytes when that is what a large frame needs, and otherwise
+-- at least 'minimumCapacity' and twice the bytes being moved, so that a
+-- buffer grown one receive at a time copies each byte a bounded number of
+-- times.
+reserve :: Int -> ReadBuffer -> IO ReadBuffer
+reserve n buffer
+  | start buffer + n <= capacity buffer = pure buffer
+  | otherwise = do
+      let live = end buffer - start buffer
+          newCapacity = maximum [n, minimumCapacity, 2 * live]
+      newStorage <- ByteString.Internal.mallocByteString newCapacity
+      withForeignPtr (storage buffer) \source ->
+        withForeignPtr newStorage \target ->
+          copyBytes target (source `plusPtr` start buffer) live
+      pure ReadBuffer {storage = newStorage, capacity = newCapacity, start = 0, end = live}
+
+-- | The smallest storage allocated, which is also the most a single receive
+-- reads while only small messages are being waited for.
+minimumCapacity :: Int
+minimumCapacity = 65536
+
+-- | Receive once from the socket into the buffer's free region, after making
+-- room for @n@ bytes in all, reporting whether the peer closed the
+-- connection. Blocks until bytes are available.
+--
+-- The receive and the recording of its bytes happen under 'mask_', so an
+-- async exception can never land between @recv@ returning and its bytes
+-- being recorded, which would drop them and desync the stream. @recv@
+-- itself stays interruptible inside 'mask_'. Making room is a pure
+-- replacement of the buffer, safe to interrupt at any point.
+receiveSome :: Transport -> Int -> IO Bool
+receiveSome transport n = do
+  buffer <- readIORef (readBuffer transport) >>= reserve n
+  writeIORef (readBuffer transport) buffer
+  mask_ do
+    received <-
+      withForeignPtr (storage buffer) \pointer ->
+        Socket.recvBuf (socket transport) (pointer `plusPtr` end buffer) (capacity buffer - end buffer)
+    if received == 0
+      then pure True
+      else do
+        writeIORef (readBuffer transport) buffer {end = end buffer + received}
+        pure False
 
 -- | Open a connection to the given host, numeric host address and port, in
 -- the order libpq considers them:
@@ -78,7 +153,7 @@ connectTcp host port = do
     address : _ -> do
       sock <- Socket.socket (Socket.addrFamily address) (Socket.addrSocketType address) (Socket.addrProtocol address)
       Socket.connect sock (Socket.addrAddress address)
-      buffer <- newIORef ByteString.empty
+      buffer <- newReadBuffer
       pure Transport {socket = sock, readBuffer = buffer}
 
 -- | Open a connection to a Unix-domain socket at the given path (the
@@ -90,7 +165,7 @@ connectUnix path
   | otherwise = do
       sock <- Socket.socket Socket.AF_UNIX Socket.Stream 0
       Socket.connect sock (Socket.SockAddrUnix path)
-      buffer <- newIORef ByteString.empty
+      buffer <- newReadBuffer
       pure Transport {socket = sock, readBuffer = buffer}
 
 -- | An unconnected transport, for representing a \"null\" connection. Its
@@ -98,7 +173,7 @@ connectUnix path
 unconnected :: IO Transport
 unconnected = do
   sock <- Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol
-  buffer <- newIORef ByteString.empty
+  buffer <- newReadBuffer
   pure Transport {socket = sock, readBuffer = buffer}
 
 -- | Close the connection.
@@ -163,22 +238,14 @@ awaitWritableOrReadable sock = do
 
 -- | Absorb one chunk of incoming data into the read buffer - the analogue
 -- of libpq calling @pqReadData()@ inside its send loop. Only called once
--- the socket has reported readable, so the @recv@ cannot block. The chunk
--- is recorded under 'mask_' for the same reason as in 'fillTo': an async
--- exception must never land between @recv@ returning and its bytes being
--- recorded, or those bytes would be lost and the stream desynced. An empty
--- chunk is the peer closing the connection mid-send, reported like every
--- other transport-level EOF.
+-- the socket has reported readable, so the @recv@ cannot block. Room is
+-- made for one byte more than is buffered, so the receive always has
+-- somewhere to go. The peer closing the connection mid-send is reported
+-- like every other transport-level EOF.
 drainIncoming :: Transport -> IO ()
 drainIncoming transport = do
-  closed <-
-    mask_ do
-      chunk <- Socket.ByteString.recv (socket transport) 65536
-      if ByteString.null chunk
-        then pure True
-        else do
-          modifyIORef' (readBuffer transport) (<> chunk)
-          pure False
+  buffer <- readIORef (readBuffer transport)
+  closed <- receiveSome transport (end buffer - start buffer + 1)
   when closed do
     ioError (mkIOError eofErrorType "pqi-native: connection closed by server" Nothing Nothing)
 #endif
@@ -193,25 +260,16 @@ drainIncoming transport = do
 -- must stay abandonable by 'System.Timeout.timeout'; masking the wait
 -- uninterruptibly turns that stall into a deadlock no timer can break.
 --
--- Only the step that moves bytes off the socket and into the buffer is masked,
--- which is all the atomicity the framing needs: an async exception can never
--- land in the gap between @recv@ returning and its bytes being recorded, so
--- bytes are never dropped. @recv@ itself stays interruptible inside 'mask_',
--- so the blocking wait keeps its abandonability.
+-- Only the step that moves bytes off the socket and into the buffer is masked
+-- (see 'receiveSome'), which is all the atomicity the framing needs, and
+-- the blocking wait keeps its abandonability.
 fillTo :: Transport -> Int -> IO ()
 fillTo transport n = go
   where
     go = do
-      buffered <- readIORef (readBuffer transport)
-      let missing = n - ByteString.length buffered
-      when (missing > 0) do
-        closed <- mask_ do
-          chunk <- Socket.ByteString.recv (socket transport) (max 4096 missing)
-          if ByteString.null chunk
-            then pure True
-            else do
-              modifyIORef' (readBuffer transport) (<> chunk)
-              pure False
+      buffer <- readIORef (readBuffer transport)
+      when (end buffer - start buffer < n) do
+        closed <- receiveSome transport n
         when closed do
           ioError (mkIOError eofErrorType "pqi-native: connection closed by server" Nothing Nothing)
         go
@@ -222,7 +280,8 @@ fillTo transport n = go
 -- Buffering the whole frame before consuming any of it keeps the framing
 -- atomic without masking the wait: an async exception landing while the frame
 -- is still incomplete leaves the buffer untouched, and the frame is taken out
--- of the buffer in a single 'atomicModifyIORef'' step. The earlier shape -
+-- of the buffer in a single 'atomicModifyIORef'' step. The body is a slice of
+-- the buffer's storage, not a copy. The earlier shape -
 -- consuming the header, then blocking again for the body - is what made a
 -- mid-read interrupt desync the connection, and what an outer
 -- 'Control.Exception.uninterruptibleMask_' was papering over at the cost of
@@ -230,13 +289,13 @@ fillTo transport n = go
 receiveFrame :: Transport -> IO (Word8, ByteString)
 receiveFrame transport = do
   fillTo transport 5
-  header <- ByteString.take 5 <$> readIORef (readBuffer transport)
+  header <- ByteString.take 5 . buffered <$> readIORef (readBuffer transport)
   let frameLength = decodeInt32BE (ByteString.drop 1 header)
       frameSize = 5 + max 0 (frameLength - 4)
   fillTo transport frameSize
-  atomicModifyIORef' (readBuffer transport) \buffered ->
-    let (frame, rest) = ByteString.splitAt frameSize buffered
-     in (rest, (ByteString.head frame, ByteString.drop 5 frame))
+  atomicModifyIORef' (readBuffer transport) \buffer ->
+    let frame = ByteString.take frameSize (buffered buffer)
+     in (buffer {start = start buffer + frameSize}, (ByteString.head frame, ByteString.drop 5 frame))
 
 -- | Read bytes until the peer closes the connection (EOF), discarding them.
 -- Used by the cancel path to mirror libpq's behaviour: keep the socket open
