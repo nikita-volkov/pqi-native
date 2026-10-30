@@ -18,6 +18,7 @@ import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.Char (isDigit)
 import Data.List (findIndex)
 import qualified Data.Map.Strict as Map
+import qualified Data.Vector as Vector
 import Pqi
   ( Cancel (..),
     ExecStatus (..),
@@ -171,32 +172,39 @@ mkResult result =
             (literalErrorMessage result),
       resultErrorField = \field -> pure (Map.lookup (fieldCodeByte field) (errorFields result)),
       unsafeFreeResult = pure (),
-      ntuples = pure (fromIntegral (length (rows result))),
-      nfields = pure (fromIntegral (length (fields result))),
+      ntuples = pure (fromIntegral (Vector.length indexedRows)),
+      nfields = pure (fromIntegral (Vector.length indexedFields)),
       fname = \column -> pure $ do
-        fd <- atMay (fields result) column
+        fd <- atMay indexedFields column
         if ByteString.null (name fd) then Nothing else Just (name fd),
       fnumber = \colName ->
         pure (fromIntegral <$> findIndex (\field -> name field == foldIdentifier colName) (fields result)),
-      ftable = \column -> pure (maybe 0 tableOid (atMay (fields result) column)),
+      ftable = \column -> pure (maybe 0 tableOid (atMay indexedFields column)),
       ftablecol = \column ->
-        pure (maybe 0 (\field -> fromIntegral (columnAttributeNumber field :: Int16)) (atMay (fields result) column)),
+        pure (maybe 0 (\field -> fromIntegral (columnAttributeNumber field :: Int16)) (atMay indexedFields column)),
       fformat = \column ->
-        pure (maybe Text (\field -> formatOf (formatCode field)) (atMay (fields result) column)),
-      ftype = \column -> pure (maybe 0 typeOid (atMay (fields result) column)),
+        pure (maybe Text (\field -> formatOf (formatCode field)) (atMay indexedFields column)),
+      ftype = \column -> pure (maybe 0 typeOid (atMay indexedFields column)),
       fmod = \column ->
-        pure (maybe 0 (\field -> fromIntegral (typeModifier field :: Int32)) (atMay (fields result) column)),
+        pure (maybe 0 (\field -> fromIntegral (typeModifier field :: Int32)) (atMay indexedFields column)),
       fsize = \column ->
-        pure (maybe 0 (\field -> fromIntegral (typeSize field :: Int16)) (atMay (fields result) column)),
-      getvalue = \row column -> pure (join (cellAt result row column)),
-      getvalue' = \row column -> pure (join (cellAt result row column)),
-      getisnull = \row column -> pure (maybe True isNothing (cellAt result row column)),
-      getlength = \row column -> pure (maybe 0 (maybe 0 ByteString.length) (cellAt result row column)),
-      nparams = pure (fromIntegral (length (paramOids result))),
-      paramtype = \index -> pure (fromMaybe 0 (atMay (paramOids result) index)),
+        pure (maybe 0 (\field -> fromIntegral (typeSize field :: Int16)) (atMay indexedFields column)),
+      getvalue = \row column -> pure (join (cellAt indexedRows row column)),
+      getvalue' = \row column -> pure (join (cellAt indexedRows row column)),
+      getisnull = \row column -> pure (maybe True isNothing (cellAt indexedRows row column)),
+      getlength = \row column -> pure (maybe 0 (maybe 0 ByteString.length) (cellAt indexedRows row column)),
+      nparams = pure (fromIntegral (Vector.length indexedParamOids)),
+      paramtype = \index -> pure (fromMaybe 0 (atMay indexedParamOids index)),
       cmdStatus = pure (Just (fromMaybe "" (commandTag result))),
       cmdTuples = pure (Just (maybe "" affectedRows (commandTag result)))
     }
+  where
+    -- Built once per result on first access and shared by every accessor,
+    -- so that a lookup by index is constant time, as in libpq. Walking the
+    -- lists for each lookup made scanning a result quadratic in its rows.
+    indexedRows = Vector.fromList (map Vector.fromList (rows result))
+    indexedFields = Vector.fromList (fields result)
+    indexedParamOids = Vector.fromList (paramOids result)
 
 -- | Build a 'Cancel' whose field closes over the given 'NativeCancel'.
 mkCancel :: NativeCancel -> Cancel
@@ -219,16 +227,12 @@ mkCancel nc =
 
 -- * Helpers for 'mkResult'
 
-atMay :: [a] -> Int32 -> Maybe a
-atMay xs i
-  | i < 0 = Nothing
-  | otherwise = case drop (fromIntegral i) xs of
-      x : _ -> Just x
-      [] -> Nothing
+atMay :: Vector.Vector a -> Int32 -> Maybe a
+atMay xs i = xs Vector.!? fromIntegral i
 
-cellAt :: NativeResult -> Int32 -> Int32 -> Maybe (Maybe ByteString)
-cellAt result row column = do
-  rowValues <- atMay (rows result) row
+cellAt :: Vector.Vector (Vector.Vector (Maybe ByteString)) -> Int32 -> Int32 -> Maybe (Maybe ByteString)
+cellAt indexedRows row column = do
+  rowValues <- atMay indexedRows row
   atMay rowValues column
 
 formatOf :: Int16 -> Format

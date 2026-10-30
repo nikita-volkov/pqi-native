@@ -17,7 +17,7 @@ module Pqi.Native.Query
   )
 where
 
-import Control.Exception (catch, mask_)
+import Control.Exception (catch, mask, mask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Vector.Mutable as MVector
@@ -77,33 +77,41 @@ tooManyParams = (> maxParamCount) . length
 
 -- | Simple query. Returns the last result, mirroring @PQexec@.
 exec :: Connection -> ByteString -> IO (Maybe NativeResult)
-exec connection sql = withReady connection $ guardLoss do
-  sendMessage connection (queryMessage sql)
-  lastMaybe <$> collectSimple connection sql
+exec connection sql =
+  synchronously
+    connection
+    (queryMessage sql)
+    (lastMaybe <$> collectSimple connection sql)
 
 -- | Parameterized query via the extended protocol.
 execParams :: Connection -> ByteString -> [Maybe (Word32, ByteString, Format)] -> Format -> IO (Maybe NativeResult)
 execParams connection sql params resultFormat
   | tooManyParams params = pure Nothing
-  | otherwise = withReady connection $ guardLoss do
-      sendMessage connection (paramsWrite sql params resultFormat)
-      Just <$> collectExtended connection sql
+  | otherwise =
+      synchronously
+        connection
+        (paramsWrite sql params resultFormat)
+        (Just <$> collectExtended connection sql)
 
 -- | Prepare a named statement.
 prepare :: Connection -> ByteString -> ByteString -> Maybe [Word32] -> IO (Maybe NativeResult)
 prepare connection name sql parameterTypes
   | maybe False tooManyParams parameterTypes = pure Nothing
-  | otherwise = withReady connection $ guardLoss do
-      sendMessage connection (prepareWrite name sql parameterTypes)
-      Just <$> collectExtended connection sql
+  | otherwise =
+      synchronously
+        connection
+        (prepareWrite name sql parameterTypes)
+        (Just <$> collectExtended connection sql)
 
 -- | Execute a previously prepared statement.
 execPrepared :: Connection -> ByteString -> [Maybe (ByteString, Format)] -> Format -> IO (Maybe NativeResult)
 execPrepared connection name params resultFormat
   | tooManyParams params = pure Nothing
-  | otherwise = withReady connection $ guardLoss do
-      sendMessage connection (preparedWrite name params resultFormat)
-      Just <$> collectExtended connection ""
+  | otherwise =
+      synchronously
+        connection
+        (preparedWrite name params resultFormat)
+        (Just <$> collectExtended connection "")
 
 -- * Asynchronous flows
 
@@ -400,15 +408,19 @@ popPendingParseOrigin connection =
 
 -- | Describe a prepared statement.
 describePrepared :: Connection -> ByteString -> IO (Maybe NativeResult)
-describePrepared connection name = withReady connection $ guardLoss do
-  sendMessage connection (describeStatementMessage name <> syncMessage)
-  Just <$> collectExtended connection ""
+describePrepared connection name =
+  synchronously
+    connection
+    (describeStatementMessage name <> syncMessage)
+    (Just <$> collectExtended connection "")
 
 -- | Describe a portal.
 describePortal :: Connection -> ByteString -> IO (Maybe NativeResult)
-describePortal connection name = withReady connection $ guardLoss do
-  sendMessage connection (describePortalMessage name <> syncMessage)
-  Just <$> collectExtended connection ""
+describePortal connection name =
+  synchronously
+    connection
+    (describePortalMessage name <> syncMessage)
+    (Just <$> collectExtended connection "")
 
 -- * Parameter projections
 
@@ -435,6 +447,36 @@ formatCodeOf = \case
   Binary -> 1
 
 -- * Result collection
+
+-- | Run a synchronous flow: send the write, then collect its results up to
+-- @ReadyForQuery@ (or the start of a @COPY@).
+--
+-- First, as libpq's @PQexecStart@ does, any results of an earlier query that
+-- are still unread are read and discarded, so that the flow collects its own
+-- and not theirs. Those are left by a 'sendQuery' whose results were never
+-- fetched, and by a synchronous flow that an asynchronous exception
+-- interrupted while it waited: the connection is marked busy from the send
+-- until the collection is over, so an interrupted flow leaves it busy. This
+-- also lets a 'Pqi.cancel' from another thread reach the query. libpq refuses
+-- a synchronous flow in pipeline mode, so there is nothing to discard there.
+--
+-- If the connection is lost while discarding, the flow returns no result and
+-- the error message is the loss, as libpq's @PQexec@ does.
+synchronously :: Connection -> Poker.Write -> IO (Maybe NativeResult) -> IO (Maybe NativeResult)
+synchronously connection write collect = withReady connection do
+  pipeline <- inPipeline connection
+  unless pipeline discardUnread
+  status <- readIORef (connStatus connection)
+  if status /= ConnectionOk
+    then pure Nothing
+    else guardLoss $ mask \restore -> do
+      sendMessage connection write
+      writeIORef (asyncPending connection) True
+      result <- restore collect
+      writeIORef (asyncPending connection) False
+      pure result
+  where
+    discardUnread = getNextResult connection >>= maybe (pure ()) (const discardUnread)
 
 -- | Only run a flow on a ready connection; mirror libpq returning no result
 -- when the connection is not usable, with \"no connection to the server\" as
