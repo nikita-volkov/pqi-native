@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: pqi-native
-version: 1.0.1.16
+version: 1.0.1.17
 category: Database, PostgreSQL
 synopsis: Native (pure-Haskell) adapter for pqi
 description:
@@ -160,5 +160,19 @@ test-suite native-test
   build-depends:
     base >=4.11 && <5,
     hspec >=2.11 && <2.12,
-    pqi-conformance ^>=1.0.17,
+    pqi-conformance ^>=1.0.18,
+    pqi-native,
+
+-- The conformance specs that only reproduce on the non-threaded RTS
+-- ('Pqi.Conformance.nonThreadedSpecs'): on the threaded RTS they pass
+-- vacuously. Built without @-threaded@, unlike 'native-test'.
+test-suite native-test-nonthreaded
+  import: base
+  type: exitcode-stdio-1.0
+  hs-source-dirs: src/test
+  main-is: NonThreadedSpec.hs
+  build-depends:
+    base >=4.11 && <5,
+    hspec >=2.11 && <2.12,
+    pqi-conformance ^>=1.0.18,
     pqi-native,

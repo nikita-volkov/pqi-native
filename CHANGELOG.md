@@ -1,3 +1,9 @@
+# v1.0.1.17
+
+## Fixes
+
+- Fixed a query sent under `uninterruptibleMask` hanging forever on the non-threaded RTS ([#17](https://github.com/nikita-volkov/pqi-native/issues/17)). `Transport.awaitWritableOrReadable`, the read-or-write readiness wait of the send loop, armed both waits with base's `threadWaitReadSTM`/`threadWaitWriteSTM`. On the non-threaded RTS those fork a helper thread with a bare `forkIO` and cancel it with `killThread`, and a forked thread inherits the caller's masking state: from under an `uninterruptibleMask` - such as a `safe-exceptions` `bracket`'s release action - the cancellation of the readable wait could never be delivered while the socket stayed writable-but-not-readable, the steady state of an idle connection being sent a query, so the send, and with it the whole query, never reached the server. libpq's send loop (`pqSendSome` in `fe-misc.c`) waits with a plain `select` and has no masking state to inherit. On the non-threaded RTS the wait helper is now forked with `forkIOWithUnmask`, whose body runs unmasked whatever the caller's state (it is `forkIO (io unsafeUnmask)`), so the cancellation always delivers; on the threaded RTS the waits remain base's event-manager registrations, which have no helper thread. Caught by the `pqi-conformance` spec `Pqi.Conformance.Operation.Exec.UninterruptibleMask` (`pqi-conformance` 1.0.18.0), run by the new `native-test-nonthreaded` test suite: the suite must be built without `-threaded` for the divergence to manifest.
+
 # v1.0.1.16
 
 ## Fixes

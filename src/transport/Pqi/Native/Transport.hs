@@ -27,7 +27,21 @@ import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (plusPtr)
 #if !defined(mingw32_HOST_OS)
-import GHC.Conc (atomically, orElse, threadWaitReadSTM, threadWaitWriteSTM)
+import Control.Concurrent (forkIOWithUnmask, killThread, rtsSupportsBoundThreads)
+import GHC.Conc
+  ( STM,
+    atomically,
+    newTVarIO,
+    orElse,
+    readTVar,
+    retry,
+    threadWaitRead,
+    threadWaitReadSTM,
+    threadWaitWrite,
+    threadWaitWriteSTM,
+    writeTVar,
+  )
+import System.Posix.Types (Fd)
 #endif
 import qualified Network.Socket as Socket
 import qualified Network.Socket.ByteString as Socket.ByteString
@@ -229,12 +243,58 @@ send transport write = go (Poker.toByteString write)
 awaitWritableOrReadable :: Socket.Socket -> IO Bool
 awaitWritableOrReadable sock = do
   fd <- Socket.unsafeFdSocket sock
-  (writable, cancelWritable) <- threadWaitWriteSTM (fromIntegral fd)
-  (readable, cancelReadable) <- threadWaitReadSTM (fromIntegral fd)
+  (writable, cancelWritable) <- awaitWritableSTM (fromIntegral fd)
+  (readable, cancelReadable) <- awaitReadableSTM (fromIntegral fd)
   outcome <- atomically (fmap (\_ -> True) writable `orElse` fmap (\_ -> False) readable)
   cancelReadable
   cancelWritable
   pure outcome
+
+-- | The socket's writable wait with its cancellation: base's
+-- 'threadWaitWriteSTM', whose threaded-RTS implementation is an
+-- event-manager registration, on the threaded RTS; 'forkedWaitSTM' on the
+-- non-threaded one.
+awaitWritableSTM :: Fd -> IO (STM (), IO ())
+awaitWritableSTM fd
+  | rtsSupportsBoundThreads = threadWaitWriteSTM fd
+  | otherwise = forkedWaitSTM threadWaitWrite fd
+
+-- | The socket's readable wait with its cancellation, as 'awaitWritableSTM'.
+awaitReadableSTM :: Fd -> IO (STM (), IO ())
+awaitReadableSTM fd
+  | rtsSupportsBoundThreads = threadWaitReadSTM fd
+  | otherwise = forkedWaitSTM threadWaitRead fd
+
+-- | Arm one fd-readiness wait on the non-threaded RTS, as @(wait, cancel)@:
+-- what base's non-threaded 'threadWaitReadSTM' does, except that the helper
+-- thread is forked with 'forkIOWithUnmask'.
+--
+-- The difference matters because base forks its helper with a bare
+-- 'forkIO', and a forked thread inherits the caller's masking state: a
+-- caller inside 'Control.Exception.uninterruptibleMask' - such as a
+-- @safe-exceptions@ @bracket@'s release action - could then never deliver
+-- the 'killThread' of the cancellation to a helper blocked on a wait that
+-- never fires, and the send would hang forever: a query sent under the mask
+-- never even reached the server
+-- (<https://github.com/nikita-volkov/pqi-native/issues/17>). The body of
+-- @forkIOWithUnmask@ runs unmasked whatever the caller's state (it is
+-- @forkIO (io unsafeUnmask)@), so the kill always delivers, and the caller
+-- is never blocked in it for longer than the fd needs to report readiness
+-- or the helper to die. On the threaded RTS base's implementation arms the
+-- wait through the event manager and has no helper thread at all, which is
+-- why only the non-threaded one is replaced.
+--
+-- The race between the helper's write and the kill is harmless: whichever
+-- wins, the write goes to a 'TVar' nobody reads anymore, and a 'killThread'
+-- of an already-finished helper is a no-op.
+forkedWaitSTM :: (Fd -> IO ()) -> Fd -> IO (STM (), IO ())
+forkedWaitSTM wait fd = do
+  ready <- newTVarIO False
+  waiter <- forkIOWithUnmask \unmask -> unmask (wait fd) >> atomically (writeTVar ready True)
+  pure
+    ( readTVar ready >>= \flag -> if flag then pure () else retry,
+      killThread waiter
+    )
 
 -- | Absorb one chunk of incoming data into the read buffer - the analogue
 -- of libpq calling @pqReadData()@ inside its send loop. Only called once
